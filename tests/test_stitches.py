@@ -5,6 +5,7 @@ stitch length, satin spacing and width, underlay type, short stitches, e-stitch 
 stops, knockdown, split stitches, trims and file formats.
 
 Run:  python tests/test_stitches.py      (prints each measurement, exits non-zero on a failure)
+      python tests/test_stitches.py --rebaseline   (lock in the current bear as the new best, after a better sew-out)
 """
 
 import math
@@ -355,7 +356,72 @@ def test_coverage_no_gaps():
               f"{count} stitches cross bare fabric (worst {worst:.2f} mm)")
 
 
+BASELINE = os.path.join(os.path.dirname(__file__), "baseline_bear_v8.json")
+BEAR_SOURCE = os.path.join(os.path.dirname(__file__), "..", "source_images", "bear_original.jpg")
+
+
+def measure_bear_v8():
+    """The bear that sewed out best (v8 D: original JPEG art, 2.5 in, T-shirt settings), measured."""
+    import json
+    import shapely
+    import coverage as cov
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+    import analyze_pes
+    s = dz.Settings(width_mm=400, height_mm=63.5, colors=0, brother_colors=True)
+    for k, v in dz.FABRICS["T-shirt / knit"][0].items():
+        setattr(s, k, v)
+    art, pattern, center = cov.art_and_result(dz.load_image(BEAR_SOURCE), s)
+    share, _ = cov.coverage(art, pattern, center)
+    inside = art.buffer(s.pull_comp_mm + 0.15)
+    shapely.prepare(inside)
+    prev, strays = None, 0
+    for x, y, c in pattern.stitches:
+        c &= 0xFF
+        q = (x / 10 + center[0], y / 10 + center[1])
+        if c == STITCH and prev is not None and math.dist(prev, q) > 0.5:
+            t = np.linspace(0, 1, max(2, int(math.dist(prev, q) / 0.2)))
+            out = ~shapely.contains_xy(inside, prev[0] + (q[0] - prev[0]) * t, prev[1] + (q[1] - prev[1]) * t)
+            strays += float(out.mean()) * math.dist(prev, q) > 0.3
+        if c in (STITCH, JUMP):
+            prev = q
+    info = dz.describe(pattern)
+    with tempfile.TemporaryDirectory() as tmp:
+        rep = analyze_pes.analyze(dz.save(pattern, os.path.join(tmp, "b.pes")))
+    return {"height_in": round(info["height_mm"] / 25.4, 3), "stitches": info["stitches"], "trims": info["trims"],
+            "uncovered_pct": round(100 * share, 3), "strays": int(strays),
+            "fill_spacing_mm": round(rep["fill_spacing"], 3), "underlay_spacing_mm": round(rep["underlay_spacing"], 3)}
+
+
+def test_baseline_bear_v8():
+    """Locked baseline: changes must not make the best sew-out (v8 D) worse."""
+    import json
+    if not (os.path.exists(BEAR_SOURCE) and os.path.exists(BASELINE)):
+        print("SKIP  baseline bear v8 (source image not on this computer)")
+        return
+    base, now = json.load(open(BASELINE)), measure_bear_v8()
+    rules = [
+        ("size stays 2.5 in", abs(now["height_in"] - base["height_in"]) <= 0.03, f"{now['height_in']} in"),
+        ("density (stitch count) within 12%", abs(now["stitches"] - base["stitches"]) <= 0.12 * base["stitches"],
+         f"{now['stitches']:,} vs {base['stitches']:,}"),
+        ("trims no more than +5", now["trims"] <= base["trims"] + 5, f"{now['trims']} vs {base['trims']}"),
+        ("uncovered art no worse", now["uncovered_pct"] <= base["uncovered_pct"] + 0.15,
+         f"{now['uncovered_pct']}% vs {base['uncovered_pct']}%"),
+        ("stray strands no more", now["strays"] <= base["strays"], f"{now['strays']} vs {base['strays']}"),
+        ("fill rows within 0.02 mm", abs(now["fill_spacing_mm"] - base["fill_spacing_mm"]) <= 0.02,
+         f"{now['fill_spacing_mm']} vs {base['fill_spacing_mm']} mm"),
+        ("underlay rows within 0.1 mm", abs(now["underlay_spacing_mm"] - base["underlay_spacing_mm"]) <= 0.1,
+         f"{now['underlay_spacing_mm']} vs {base['underlay_spacing_mm']} mm"),
+    ]
+    for name, ok, detail in rules:
+        check(f"baseline v8 bear: {name}", ok, detail)
+
+
 if __name__ == "__main__":
+    if "--rebaseline" in sys.argv:  # after a sew-out that's better still: lock the new result in
+        import json
+        json.dump(measure_bear_v8(), open(BASELINE, "w"), indent=1)
+        print("baseline updated:", open(BASELINE).read())
+        sys.exit(0)
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
             try:
