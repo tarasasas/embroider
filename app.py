@@ -43,6 +43,9 @@ def register_bundled_fonts():
 
 
 STITCH_STYLES = {  # lettering stitch style -> settings
+    "Smooth fill": {"fill_type": "smooth", "edge": "none", "applique_all": False},
+    "Fill + contour edge": {"fill_type": "contour", "edge": "none", "applique_all": False},
+    "Light fill": {"fill_type": "light", "edge": "none", "applique_all": False},
     "Auto (satin + fill)": {"fill_type": "auto", "edge": "none", "applique_all": False},
     "Satin": {"fill_type": "satin", "edge": "none", "applique_all": False},
     "Fill": {"fill_type": "tatami", "edge": "none", "applique_all": False},
@@ -76,7 +79,7 @@ class App(tk.Tk):
         self.fixed_hoop = False
         self.photo_hoop = None
         self.layout_items = []
-        self.layout_style = "Auto (satin + fill)"
+        self.layout_style = "Smooth fill"
 
         d = dz.Settings()
         hoop = "4 x 4 in (100 x 100 mm)"
@@ -397,7 +400,7 @@ class App(tk.Tk):
         use = {k: tk.BooleanVar(value=draft.get("use", {}).get(k, False)) for k in ("outline", "outline2", "shadow")}
         width = {k: tk.DoubleVar(value=draft.get("width", {}).get(k, value))
                  for k, value in (("outline", 0.06), ("outline2", 0.05), ("shadow", 0.05))}
-        style = tk.StringVar(value=draft.get("style", "Auto (satin + fill)"))
+        style = tk.StringVar(value=draft.get("style", "Auto (satin + fill)" if motif_only else "Smooth fill"))
         motifs = sorted(dz.motifs())
         default_motif = ("Star" if "Star" in motifs else next(iter(motifs), "")) if motif_only else "None"
         motif = tk.StringVar(value=draft.get("motif", default_motif))

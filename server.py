@@ -129,6 +129,7 @@ def convert_request(request):
         "width_mm": info["width_mm"], "height_mm": info["height_mm"],
         "stitches": info["stitches"], "minutes": info["minutes"], "threads": threads,
         "lettering_styles": True,
+        "fill_type": settings.fill_type,
         "fixed_hoop": settings.fixed_hoop,
     }
 

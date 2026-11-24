@@ -78,9 +78,9 @@ struct ContentView: View {
     @State private var showMotifs = false
     @State private var showLayout = false
     @State private var layoutItems: [HoopLayoutItem] = []
-    @State private var layoutStyle = LetteringStitchStyle.auto
+    @State private var layoutStyle = LetteringStitchStyle.smooth
     @State private var letteringDraft = LetteringDraft()
-    @State private var motifDraft = LetteringDraft(motif: "Star")
+    @State private var motifDraft = LetteringDraft(stitch: .auto, motif: "Star")
     @State private var photoRemoveBackground: Bool?
     @State private var artworkColorCount = 0
     @State private var lockRatio = true   // keep width x height in the image's proportions

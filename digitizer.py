@@ -72,7 +72,7 @@ FABRICS = {
                     "Firm tear-away backing. Keep designs under about 55 mm tall."),
 }
 
-FILL_TYPES = ("auto", "tatami", "satin", "none")  # "none": no fill, only the edge lines (sketch / bean styles)
+FILL_TYPES = ("auto", "tatami", "satin", "smooth", "contour", "light", "none")
 LINE_TYPES = ("none", "running", "triple", "satin", "estitch")
 FILL_PATTERNS = ("brick3", "brick2", "brick4", "diagonal", "random")
 STOP_MARK = "STOP"  # placed in a run list: the machine pauses here (applique steps)
@@ -1167,6 +1167,23 @@ def _walk(ring, shape, step):
     return out
 
 
+def _contour_edge(poly, pen):
+    """Finish the fill with a running row just inside the outer edge and each cutout."""
+    allowed = poly.buffer(0.05)
+    shapely.prepare(allowed)
+    runs = []
+    for part in _polygons_of(poly.buffer(-0.25)):
+        for ring in (part.exterior, *part.interiors):
+            if ring.length < 2.0:
+                continue
+            points = np.asarray(ring.coords)[:-1]
+            start = int(np.argmin(((points - pen) ** 2).sum(axis=1))) if pen is not None else 0
+            run = _walk(np.roll(points, -start, axis=0), allowed, 1.8)
+            runs.append(run)
+            pen = np.array(run[-1])
+    return runs, pen
+
+
 def _tatami(poly, center, s, pen):
     """Underlay (edge walk + sparse perpendicular rows) and the top fill of one polygon."""
     angle = s.fill_angle
@@ -1192,7 +1209,11 @@ def _tatami(poly, center, s, pen):
             runs += under
     top, pen = _fill_rows(_scan_poly(poly, center, angle, s.row_spacing_mm), s.row_spacing_mm,
                           s.stitch_length_mm, 0.5, s.min_area_mm2, pen, s.fill_pattern, shape=poly.buffer(0.15))
-    return runs + top, pen
+    runs += top
+    if top and s.fill_type == "contour":
+        edge, pen = _contour_edge(poly, pen)
+        runs += edge
+    return runs, pen
 
 
 def _split_at_corners(path, closed, leaf_a, leaf_b, radius, angle=60.0):
@@ -1627,7 +1648,11 @@ def digitize(labels, palette, s: Settings, groups=None):
     H, W = labels.shape
     center = (W * PX_MM / 2.0, H * PX_MM / 2.0)
 
-    satin_width = {"auto": s.satin_max_mm, "satin": 12.0, "tatami": 0.0, "none": 0.0}[s.fill_type]
+    satin_width = {"auto": s.satin_max_mm, "satin": 12.0}.get(s.fill_type, 0.0)
+    lettering_fill = s.fill_type in ("smooth", "contour", "light")
+    if lettering_fill:
+        spacing = max(0.33, s.row_spacing_mm) if s.fill_type == "light" else s.row_spacing_mm
+        s = replace(s, auto_angle=False, row_spacing_mm=spacing, stitch_length_mm=min(2.6, s.stitch_length_mm))
     pen, blocks, all_polys = None, [], []
     shapes = [_mask_polygons(labels == ci, s.min_area_mm2) if (labels == ci).any() else [] for ci in range(len(palette))]
     if s.bold_mm > 0:  # bolder lines: grow every shape outward (rounded), then tidy the outline
@@ -1665,7 +1690,8 @@ def digitize(labels, palette, s: Settings, groups=None):
         # it: it carries on ~2 mm underneath, so the two overlap and no fabric can show between them
         later = [q for k in range(ci + 1, len(shapes)) for q in shapes[k]]
         if later and wide:
-            tuck = unary_union(polys).buffer(2.0).intersection(unary_union(later).buffer(-0.3))
+            overlap = 0.5 if lettering_fill else 2.0
+            tuck = own.buffer(overlap).intersection(unary_union(later).buffer(-0.3))
             wide_area = unary_union([wide_area, tuck])
         wide = [w for w in _polygons_of(wide_area) if w.area >= s.min_area_mm2]
 

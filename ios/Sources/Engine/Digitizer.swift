@@ -23,6 +23,9 @@ enum Digitizer {
         let center = Pt(Double(w) / 2, Double(h) / 2)
         let minArea = s.minAreaMM2 * px * px
         let inset = max(1, Int((0.4 * px).rounded()))
+        let stitchLength = s.letteringStyle?.usesShortFillStitches == true
+            ? min(2.6, s.stitchLengthMM) : s.stitchLengthMM
+        let rowSpacing = s.letteringStyle == .light ? max(0.33, s.rowSpacingMM) : s.rowSpacingMM
 
         var pen: Pt? = nil
         var blocks: [(RGB, [[Pt]])] = []
@@ -37,7 +40,7 @@ enum Digitizer {
                              minLen: 1.0 * px, minArea: 4 * minArea, pen: &pen)
             }
             runs += fill(mask: mask, w: w, h: h, center: center, angle: s.fillAngle,
-                         spacing: s.rowSpacingMM * px, stitch: s.stitchLengthMM * px,
+                         spacing: rowSpacing * px, stitch: stitchLength * px,
                          pull: s.pullCompMM * px, minLen: 0.5 * px, minArea: minArea, pen: &pen)
             if !runs.isEmpty { blocks.append((color, runs)) }
         }

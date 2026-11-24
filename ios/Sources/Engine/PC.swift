@@ -17,6 +17,7 @@ enum PCError: LocalizedError {
     case unreachable
     case wrongCode
     case needsLayoutServer
+    case needsStitchServer
     case rejected(String)
 
     var errorDescription: String? {
@@ -24,6 +25,7 @@ enum PCError: LocalizedError {
         case .unreachable: return "Could not reach the PC. Is it on, on the same Wi-Fi, and is the phone server running?"
         case .wrongCode: return "The PC rejected the pairing code."
         case .needsLayoutServer: return "Update and restart the PC server to preserve hoop placement."
+        case .needsStitchServer: return "Update and restart the PC server to use this stitch style."
         case .rejected(let message): return message
         }
     }
@@ -100,6 +102,10 @@ struct PCClient {
         else { throw PCError.rejected("The PC sent back something unexpected.") }
         if settings.fixedHoop, json["fixed_hoop"] as? Bool != true {
             throw PCError.needsLayoutServer
+        }
+        if let style = settings.letteringStyle, style.usesShortFillStitches,
+           json["fill_type"] as? String != style.fill {
+            throw PCError.needsStitchServer
         }
         if settings.letteringStyle?.requiresPC == true, json["lettering_styles"] as? Bool != true {
             throw PCError.rejected("Update and restart the PC server to use this stitch style.")

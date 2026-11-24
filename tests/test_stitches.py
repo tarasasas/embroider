@@ -258,6 +258,29 @@ def test_knockdown():
 # --------------------------------------------------------------------------- whole designs
 
 
+def test_lettering_fills():
+    def lettering(draw):
+        draw.rectangle((40, 40, 555, 180), fill="black")
+        draw.ellipse((180, 220, 420, 460), fill="black")
+        draw.ellipse((245, 285, 355, 395), fill="white")
+
+    art = shape(lettering, (600, 500))
+    patterns = {}
+    for style in ("smooth", "light", "contour"):
+        s = settings(width_mm=66, height_mm=55, fill_type=style, auto_angle=True, fill_angle=40)
+        patterns[style] = dz.convert(art, s).pattern
+
+    rows = segments(patterns["smooth"])
+    dx, dy = rows[:, 2] - rows[:, 0], rows[:, 3] - rows[:, 1]
+    angles = np.degrees(np.arctan2(-dy, dx)) % 180
+    long = lengths(rows) >= 1.5
+    grain = np.mean(np.abs(angles[long] - 40) < 3)
+    check("smooth lettering uses one fill direction", grain > 0.85, f"{grain:.0%} of longer stitches")
+    counts = {style: pattern.count_stitch_commands(STITCH) for style, pattern in patterns.items()}
+    check("light lettering uses fewer stitches", counts["light"] < 0.8 * counts["smooth"], str(counts))
+    check("contour finish adds a stitched edge", counts["contour"] > counts["smooth"], str(counts))
+
+
 def test_fixed_hoop_positions():
     # A tall piece and a wide piece leave most of the hoop empty.
     art = Image.new("RGBA", (1000, 1000))

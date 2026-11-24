@@ -25,7 +25,7 @@ struct LetteringDraft {
     var outline = LetteringEffect(color: .systemOrange, amount: 0.06)
     var outside = LetteringEffect(color: .white, amount: 0.05)
     var shadow = LetteringEffect(color: .darkGray, amount: 0.05)
-    var stitch = LetteringStitchStyle.auto
+    var stitch = LetteringStitchStyle.smooth
     var motif = ""
     var placement = MotifPlacement.right
     var motifScale = 0.6

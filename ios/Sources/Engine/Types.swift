@@ -7,11 +7,14 @@ let MIN_STITCH_MM = 0.4  // shorter stitches just knot the thread
 typealias Pt = SIMD2<Double>
 
 enum LetteringStitchStyle: String, CaseIterable, Identifiable {
-    case auto, tatami, satin, sketch, bean, applique
+    case smooth, contour, light, auto, tatami, satin, sketch, bean, applique
 
     var id: Self { self }
     var title: String {
         switch self {
+        case .smooth: return "Smooth fill"
+        case .contour: return "Fill + contour edge"
+        case .light: return "Light fill"
         case .auto: return "Auto (satin + fill)"
         case .tatami: return "Fill"
         case .satin: return "Satin"
@@ -20,8 +23,15 @@ enum LetteringStitchStyle: String, CaseIterable, Identifiable {
         case .applique: return "Appliqué"
         }
     }
-    var requiresPC: Bool { self != .auto && self != .tatami }
-    var fill: String { self == .sketch || self == .bean ? "none" : self == .tatami || self == .satin ? rawValue : "auto" }
+    var requiresPC: Bool { ![.auto, .tatami, .smooth, .light].contains(self) }
+    var usesShortFillStitches: Bool { [.smooth, .contour, .light].contains(self) }
+    var fill: String {
+        switch self {
+        case .auto, .applique: return "auto"
+        case .sketch, .bean: return "none"
+        default: return rawValue
+        }
+    }
     var edge: String? { self == .sketch ? "running" : self == .bean ? "triple" : nil }
 }
 
