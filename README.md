@@ -49,21 +49,35 @@ python digitizer.py logo.png logo.pes --width 90 --height 90 --colors 4 --previe
 python digitizer.py --help
 ```
 
-## Settings
+## Stitch types and options
 
-| Setting | What it does |
+| Feature | What it does |
 |---|---|
-| Max width / height | The design is scaled to fit inside this size, keeping its proportions. Keep it a bit smaller than the hoop. |
-| Thread colors | How many colors the image is reduced to (not counting a removed background). |
-| Detail cleanup | Removes specks and smooths jagged edges. Raise it for JPEGs and scans. |
-| Remove background | Skips the color along the image border (or transparent pixels). Every area of that color is skipped, including areas inside the design. |
-| Use Brother thread colors | Snaps colors to the Brother thread chart, so the preview matches the threads you'll load. |
-| Row spacing | Fill density. Smaller = denser (0.25-0.35 mm is typical). Go denser for towels and fleece, lighter for thin fabric. |
-| Stitch length | Length of fill stitches. |
-| Fill angle | Direction of the stitch rows. Changing it changes how the fill catches the light. |
-| Pull compensation | Makes rows slightly wider, because stitching pulls the fabric in. |
-| Underlay | Sparse stitches sewn first so the top fill lies flat. Leave on. |
-| Trim jumps over | Cuts the thread instead of leaving long loose threads between areas. |
+| Tatami fill | Rows sewn back and forth with staggered needle points. Density (row spacing), stitch length, angle, pull compensation. Long shapes are sewn along their length. |
+| Fill patterns | brick3 (standard), brick2, brick4, diagonal, random: how needle points are offset between rows, which sets the fill's texture. |
+| Satin columns | Narrow strokes (up to 6.5 mm) follow their centre line; split at sharp corners. |
+| Satin underlay | Picked by column width like commercial software: none (<1 mm), centre run (1-2.5 mm), edge run (2.5-4 mm), edge run + zigzag (wider). |
+| Short stitches | On tight curves every other stitch on the crowded inside edge stops short, so thread doesn't pile up. |
+| Split satin | Stitches over 7 mm are split, with staggered split points so no line shows. |
+| Fill underlay | Edge walk plus cross rows at 90 degrees. |
+| Edges / outline | Running, triple (bean), satin, or e-stitch (blanket) on each color's edge or around the whole design. |
+| Applique | Per color: placement line, pause, tack-down, pause (trim the fabric), satin cover. The pauses are same-color thread changes, like Brother's own applique files. |
+| Knockdown | Open cross-hatch under the design that flattens towel loops and fleece. On automatically for the Towel / fleece preset. |
+| Travel and trims | Moves inside a color follow a path through that color with hidden running stitches; other jumps over 1 mm are trimmed. Tie-in/tie-off lock stitches at every start and stop. |
+| Colors | Automatic color count, CIEDE2000 matching to the Brother thread chart, recolor/skip/merge per color. |
+
+All settings are in the desktop app (most under **Show advanced settings**; applique is a link next to each
+color in the thread list).
+
+### Proof
+
+`python tests/test_stitches.py` builds test shapes, converts them, and measures the real stitches against the
+settings: row spacing, stitch length, fill-pattern offsets, pull compensation, satin spacing and width,
+satin underlay by width, short stitches, split stitches, e-stitch prongs, applique pauses in the saved file,
+knockdown, trims, and all five file formats.
+
+`python tests/make_sampler.py` writes `test_sews/stitch_sampler.pes`, every fill pattern, density and satin
+type on one 4x4 in hoop, to sew and compare.
 
 ## Tips
 

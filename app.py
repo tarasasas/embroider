@@ -42,6 +42,7 @@ class App(tk.Tk):
         self.canvases = {}
         self.jobs = queue.Queue()
         self.color_edits = {}  # {color key: new rgb, or None = leave that color as bare fabric}
+        self.applique = set()  # color keys sewn as applique
 
         d = dz.Settings()
         hoop = "4 x 4 in (100 x 100 mm)"
@@ -66,6 +67,8 @@ class App(tk.Tk):
         self.trim = tk.DoubleVar(value=d.trim_mm)
         self.underlay = tk.BooleanVar(value=d.underlay)
         self.fill_type = tk.StringVar(value=d.fill_type)
+        self.fill_pattern = tk.StringVar(value=d.fill_pattern)
+        self.knockdown = tk.BooleanVar(value=d.knockdown)
         self.edge = tk.StringVar(value=d.edge)
         self.outline = tk.StringVar(value=d.outline)
         self.show_advanced = tk.BooleanVar(value=False)
@@ -132,10 +135,15 @@ class App(tk.Tk):
         self._spin(st, 4, "Fill angle (deg)", self.angle, 0, 180, 15)
         self._spin(st, 5, "Pull compensation", self.pull, 0, 0.6, 0.05)
         self._spin(st, 6, "Trim jumps over", self.trim, 1, 20, 1)
+        ttk.Label(st, text="Fill pattern").grid(row=7, column=0, sticky="w", pady=2)
+        ttk.Combobox(st, textvariable=self.fill_pattern, values=dz.FILL_PATTERNS, state="readonly", width=10).grid(
+            row=7, column=1, sticky="e", pady=2)
         ttk.Checkbutton(st, text="Underlay", variable=self.underlay).grid(
-            row=7, column=0, columnspan=2, sticky="w", pady=2)
+            row=8, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Checkbutton(st, text="Knockdown (towels, fleece)", variable=self.knockdown).grid(
+            row=9, column=0, columnspan=2, sticky="w", pady=2)
         ttk.Button(st, text="Reset to automatic settings", command=self._apply_fabric).grid(
-            row=8, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+            row=10, column=0, columnspan=2, sticky="ew", pady=(4, 0))
 
         fin = self._group(self.advanced, "Edges and outline")
         ttk.Label(fin, text="Color edges").grid(row=0, column=0, sticky="w", pady=2)
@@ -227,6 +235,8 @@ class App(tk.Tk):
         self.satin_spacing.set(values["satin_spacing_mm"])
         self.pull.set(values["pull_comp_mm"])
         self.underlay.set(values["underlay"])
+        self.knockdown.set(values.get("knockdown", False))
+        self.fill_pattern.set(d.fill_pattern)
         self.stitch_len.set(d.stitch_length_mm)
         self.angle.set(d.fill_angle)
         self.trim.set(d.trim_mm)
@@ -324,6 +334,7 @@ class App(tk.Tk):
     def _set_source(self, img, name, label):
         self.source, self.source_path, self.result = img, name, None
         self.color_edits = {}
+        self.applique = set()
         self.aspect = img.width / max(1, img.height)
         self._fit_to_hoop()
         shown = Image.new("RGBA", img.size, (244, 244, 244, 255))
@@ -343,7 +354,9 @@ class App(tk.Tk):
                 width_mm=float(self.width_in.get()) * MM_PER_INCH, height_mm=float(self.height_in.get()) * MM_PER_INCH,
                 colors=int(self.colors.get()), remove_background=self.remove_bg.get(),
                 brother_colors=self.brother.get(), cleanup=int(self.cleanup.get()),
-                fill_type=self.fill_type.get(), row_spacing_mm=float(self.spacing.get()),
+                fill_type=self.fill_type.get(), fill_pattern=self.fill_pattern.get(),
+                knockdown=self.knockdown.get(), applique=set(self.applique),
+                row_spacing_mm=float(self.spacing.get()),
                 satin_spacing_mm=float(self.satin_spacing.get()),
                 stitch_length_mm=float(self.stitch_len.get()), fill_angle=float(self.angle.get()),
                 pull_comp_mm=float(self.pull.get()), underlay=self.underlay.get(), trim_mm=float(self.trim.get()),
@@ -426,7 +439,7 @@ class App(tk.Tk):
         t.config(state="normal")
         t.delete("1.0", "end")
         for tag in t.tag_names():
-            if tag.startswith(("swatch", "action")):
+            if tag.startswith(("swatch", "action", "appl")):
                 t.tag_delete(tag)
         if threads:
             t.insert("end", "Thread order. Click a swatch to change a color (same colors merge "
@@ -455,8 +468,28 @@ class App(tk.Tk):
             if not outline:
                 t.insert("end", "skip", action)
                 t.tag_bind(action, "<Button-1>", lambda e, k=thread["keys"]: self._edit_colors(k, None))
+                appl = f"appl{i}"
+                is_appl = bool(set(thread["keys"]) & self.applique)
+                t.tag_configure(appl, foreground="#1a6fd1", underline=True)
+                t.tag_bind(appl, "<Enter>", lambda e: t.config(cursor="hand2"))
+                t.tag_bind(appl, "<Leave>", lambda e: t.config(cursor="arrow"))
+                t.insert("end", "  ")
+                t.insert("end", "sew as fill" if is_appl else "applique", appl)
+                t.tag_bind(appl, "<Button-1>", lambda e, k=thread["keys"]: self._toggle_applique(k))
             t.insert("end", "\n")
         t.config(state="disabled")
+
+    def _toggle_applique(self, keys):
+        """Applique: the machine sews a placement line, stops for you to lay fabric, tacks it down,
+        stops for you to trim it, then covers the edge with satin."""
+        if self.result is None or self.busy:
+            return
+        keys = set(keys)
+        if keys & self.applique:
+            self.applique -= keys
+        else:
+            self.applique |= keys
+        self.generate()
 
     def _pick_color(self, thread):
         chosen = colorchooser.askcolor(color=thread["hex"], title="Thread color", parent=self)

@@ -58,14 +58,17 @@ FABRICS = {
                        "Cut-away stabilizer, so the knit can't stretch while it is sewn."),
     "Denim / canvas": ({"row_spacing_mm": 0.24, "satin_spacing_mm": 0.4, "pull_comp_mm": 0.1, "underlay": True},
                        "Tear-away stabilizer and a size 90/14 needle."),
-    "Towel / fleece": ({"row_spacing_mm": 0.22, "satin_spacing_mm": 0.35, "pull_comp_mm": 0.2, "underlay": True},
+    "Towel / fleece": ({"row_spacing_mm": 0.22, "satin_spacing_mm": 0.35, "pull_comp_mm": 0.2, "underlay": True,
+                        "knockdown": True},
                        "Water-soluble topping on top so stitches don't sink into the pile."),
     "Cap / thick": ({"row_spacing_mm": 0.25, "satin_spacing_mm": 0.4, "pull_comp_mm": 0.2, "underlay": True},
                     "Firm tear-away backing. Keep designs under about 55 mm tall."),
 }
 
 FILL_TYPES = ("auto", "tatami", "satin")
-LINE_TYPES = ("none", "running", "triple", "satin")
+LINE_TYPES = ("none", "running", "triple", "satin", "estitch")
+FILL_PATTERNS = ("brick3", "brick2", "brick4", "diagonal", "random")
+STOP_MARK = "STOP"  # placed in a run list: the machine pauses here (applique steps)
 WRITABLE = {".pes", ".pec", ".dst", ".jef", ".exp", ".vp3", ".xxx", ".u01"}
 
 
@@ -88,6 +91,10 @@ class Settings:
     stitch_length_mm: float = 3.5
     fill_angle: float = 45.0
     auto_angle: bool = True  # long shapes are sewn along their length; others use fill_angle
+    fill_pattern: str = "brick3"  # needle-point offset between rows: brick2 / brick3 / brick4 / diagonal / random
+    knockdown: bool = False  # sparse cross-hatch under the design that flattens towel / fleece pile
+    applique: set = field(default_factory=set)  # color keys sewn as applique (placement, tack-down, satin cover)
+    applique_width_mm: float = 3.0  # width of the satin that covers the applique fabric's raw edge
     pull_comp_mm: float = 0.15  # widens rows to offset fabric pull-in
     underlay: bool = True
     trim_mm: float = 1.0  # jumps longer than this get a trim (loose threads show on the fabric)
@@ -374,7 +381,7 @@ def _auto_colors(fit_lab, max_k=10):
     return max_k
 
 
-def reduce_colors(img: Image.Image, s: Settings, _fit=True):
+def reduce_colors(img: Image.Image, s: Settings, _fit=True, _bg_lab=None):
     """Scales the image to the working resolution and maps every pixel to a thread color.
 
     Returns (labels, palette, groups, skipped): labels is an (H, W) int array (-1 = leave
@@ -421,12 +428,24 @@ def reduce_colors(img: Image.Image, s: Settings, _fit=True):
         img_labels = img_labels.filter(ImageFilter.ModeFilter(2 * s.cleanup + 1))
         labels = np.asarray(img_labels).astype(np.int16) - 1
 
+    bg_lab = None
     if extra_bg:
-        # the color that dominates the image border is the background
-        border = np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]])
-        border = border[border >= 0]
-        if border.size:
-            labels[labels == np.bincount(border).argmax()] = -1
+        bg = None
+        if _bg_lab is not None:
+            # second pass on the art cropped out of its margin: the edges are now mostly art, so
+            # reuse the background color found in the full picture instead of guessing again
+            d = ((np.asarray(centers_lab) - _bg_lab) ** 2).sum(axis=1)
+            if d.min() < 25.0 ** 2:
+                bg = int(d.argmin())
+        else:
+            # the color that dominates the image border is the background
+            border = np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]])
+            border = border[border >= 0]
+            if border.size:
+                bg = int(np.bincount(border).argmax())
+        if bg is not None:
+            labels[labels == bg] = -1
+            bg_lab = np.asarray(centers_lab)[bg]
 
     # The size the user asks for is the size of the stitched design, not of the picture: if the
     # picture has an empty margin around the art, crop it away and scale the art to fill the box.
@@ -438,7 +457,7 @@ def reduce_colors(img: Image.Image, s: Settings, _fit=True):
                 sx, sy = w / size[0], h / size[1]
                 box = (max(0, int(xs.min() * sx) - 2), max(0, int(ys.min() * sy) - 2),
                        min(w, int(math.ceil((xs.max() + 1) * sx)) + 2), min(h, int(math.ceil((ys.max() + 1) * sy)) + 2))
-                return reduce_colors(img.crop(box), replace(s, mirror=False, rotate=0), _fit=False)
+                return reduce_colors(img.crop(box), replace(s, mirror=False, rotate=0), _fit=False, _bg_lab=bg_lab)
 
     palette = [tuple(int(round(c)) for c in center) for center in centers]
     if s.brother_colors:
@@ -795,7 +814,21 @@ def _travel(pts, target, max_len):
         pts.append((x0 + (target[0] - x0) * f, y0 + (target[1] - y0) * f))
 
 
-def _fill_rows(rows, spacing, stitch, min_len, min_area, pen):
+def _row_phase(grid_row, pattern):
+    """Where along a row the needle points start, as a fraction of the stitch length. Offsetting
+    neighbouring rows hides the needle holes; the pattern of offsets is the fill's texture."""
+    if pattern == "brick2":
+        return (grid_row % 2) / 2
+    if pattern == "brick4":
+        return (grid_row % 4) / 4
+    if pattern == "diagonal":  # steadily creeping offset: a fine diagonal twill texture
+        return (grid_row % 5) / 5
+    if pattern == "random":
+        return ((grid_row * 2654435761) % 1000) / 1000
+    return (grid_row % 3) / 3  # brick3: the usual tatami
+
+
+def _fill_rows(rows, spacing, stitch, min_len, min_area, pen, pattern="brick3"):
     """Sews prepared rows back and forth (tatami): needle points every `stitch` along each row,
     staggered between rows.
 
@@ -873,7 +906,7 @@ def _fill_rows(rows, spacing, stitch, min_len, min_area, pen):
         pts = []
         for idx, forward in chain:
             r, t0, t1 = R[idx], T0[idx], T1[idx]
-            phase = (grid_rows[r] % 3) * stitch / 3.0  # brick offset hides row lines
+            phase = _row_phase(grid_rows[r], pattern) * stitch
             k0 = math.ceil((t0 + MIN_STITCH_MM - phase) / stitch)
             k1 = math.floor((t1 - MIN_STITCH_MM - phase) / stitch)
             inner = [phase + k * stitch for k in range(k0, k1 + 1)]
@@ -908,7 +941,7 @@ def _tatami(poly, center, s, pen):
                                     4 * s.min_area_mm2, pen)
             runs += under
     top, pen = _fill_rows(_scan_poly(poly, center, angle, s.row_spacing_mm), s.row_spacing_mm,
-                          s.stitch_length_mm, 0.5, s.min_area_mm2, pen)
+                          s.stitch_length_mm, 0.5, s.min_area_mm2, pen, s.fill_pattern)
     return runs + top, pen
 
 
@@ -1049,30 +1082,66 @@ def _satin_column(poly, path, closed, leaf_a, leaf_b, radius, step, s):
     pts, normal, lo, hi = pts[ok], normal[ok], lo[ok], hi[ok]
     pull = s.pull_comp_mm
 
-    def zigzag(idx, inset, pull_out):
-        out = []
+    n = len(pts)
+    # Short stitches: on the inside of a tight curve the needle points crowd together and the
+    # thread piles up. Where one side's points are much closer than the stitch pitch, every other
+    # stitch on that side stops short of the edge (standard in commercial digitizing software).
+    side_lo, side_hi = pts + normal * lo[:, None], pts + normal * hi[:, None]
+
+    def crowded(side):
+        a = side[np.maximum(np.arange(n) - 1, 0)]
+        b = side[np.minimum(np.arange(n) + 1, n - 1)]
+        return np.hypot(*(b - a).T) < 0.7 * 2 * step  # inside edge squeezed to under 70% of the pitch
+
+    crowd_lo, crowd_hi = crowded(side_lo), crowded(side_hi)
+
+    def zigzag(idx, inset, pull_out, short=False):
+        out, visits = [], [0, 0]
         for j, i in enumerate(idx):
             width = hi[i] - lo[i]
             if width <= 2 * inset + 0.2:
                 out.append(tuple(pts[i] + normal[i] * (hi[i] + lo[i]) / 2))
-            elif j % 2 == 0:
-                out.append(tuple(pts[i] + normal[i] * (lo[i] + inset - pull_out)))
+                continue
+            side = j % 2
+            visits[side] += 1
+            if short and (crowd_lo if side == 0 else crowd_hi)[i] and visits[side] % 2 == 0:
+                depth = 0.35 * width  # stops short, about a third of the way in
+                t = lo[i] + depth if side == 0 else hi[i] - depth
             else:
-                out.append(tuple(pts[i] + normal[i] * (hi[i] - inset + pull_out)))
+                t = lo[i] + inset - pull_out if side == 0 else hi[i] - inset + pull_out
+            out.append(tuple(pts[i] + normal[i] * t))
         return out
 
-    n = len(pts)
-    top = zigzag(range(n), 0.0, pull)
+    top = zigzag(range(n), 0.0, pull, short=True)
     if not s.underlay:
         return top
-    every = lambda pitch: list(range(0, n, max(1, round(pitch / step)))) + ([n - 1] if (n - 1) % max(1, round(pitch / step)) else [])
+
+    def every(pitch):
+        k = max(1, round(pitch / step))
+        idx = list(range(0, n, k))
+        return idx + ([n - 1] if (n - 1) % k else [])
+
+    # Underlay chosen by column width, as in commercial software:
+    #   under 1 mm: none; 1-2.5 mm: centre run; 2.5-4 mm: edge run; wider: edge run + zigzag.
+    # Each pass ends where the next one starts, so the column is sewn without jumps.
+    width = float(np.median(hi - lo))
     center = [tuple(pts[i] + normal[i] * (hi[i] + lo[i]) / 2) for i in every(2.5)]
-    under = zigzag(every(1.4), 0.3, 0.0)[::-1]  # comes back along the column, so no jump is needed
-    return center + under + top
+    if width < 1.0:
+        return top
+    if width < 2.5:
+        return center + top[::-1]
+    inset = min(0.4, width / 6)
+    edge_a = [tuple(pts[i] + normal[i] * (lo[i] + inset)) for i in every(2.0)]
+    edge_b = [tuple(pts[i] + normal[i] * (hi[i] - inset)) for i in every(2.0)][::-1]
+    if width < 4.0:
+        return edge_a + edge_b + top
+    zig = zigzag(every(1.4), inset + 0.1, 0.0)
+    return edge_a + edge_b + zig + top[::-1]
 
 
-def _line_runs(rings, kind, width_mm, pen, s):
-    """Sews closed loops (arrays of mm points) as running, triple (bean) or satin lines, nearest first."""
+def _line_runs(rings, kind, width_mm, pen, s, shape=None):
+    """Sews closed loops (arrays of mm points) as running, triple (bean), satin or e-stitch
+    (blanket) lines, nearest first. `shape` tells the e-stitch which side its prongs go."""
     prepared = [np.asarray(r, float) for r in rings if len(r) >= 8 and
                 np.hypot(*(np.roll(r, -1, axis=0) - r).T).sum() >= 3.0]
     runs = []
@@ -1099,6 +1168,19 @@ def _line_runs(rings, kind, width_mm, pen, s):
             side = np.where(np.arange(len(c)) % 2 == 0, 0.5, -0.5)[:, None]
             zig = c + normal * side * width_mm
             path += [tuple(p) for p in zig] + [tuple(zig[0]), tuple(zig[1])]
+        elif kind == "estitch":
+            # blanket stitch: a running line along the edge with a prong into the shape every 2.5 mm
+            q = _resample_closed(loop, 2.5)
+            tangent = np.roll(q, -1, axis=0) - np.roll(q, 1, axis=0)
+            tangent /= np.maximum(np.hypot(tangent[:, 0], tangent[:, 1]), 1e-9)[:, None]
+            normal = np.stack([-tangent[:, 1], tangent[:, 0]], axis=1)
+            if shape is not None:
+                probe = q + normal * min(0.5, width_mm / 2)
+                if shapely.contains_xy(shape, probe[:, 0], probe[:, 1]).mean() < 0.5:
+                    normal = -normal
+            path = [tuple(q[0])]
+            for a, nrm in zip(np.vstack([q[1:], q[:1]]), np.vstack([normal[1:], normal[:1]])):
+                path += [tuple(a), tuple(a + nrm * width_mm), tuple(a)]
         else:
             q = _resample_closed(loop, s.running_length_mm)
             q = np.vstack([q, q[:1]])
@@ -1126,9 +1208,18 @@ def _tidy(run, max_len=7.0, min_len=0.2):
             out.append(p)
     if len(run) > 1:
         out.append(run[-1])
-    final = [out[0]]
+    # split points are staggered from stitch to stitch, so wide satin doesn't show a line
+    # where every stitch is cut at the same place
+    final, count = [out[0]], 0
     for p in out[1:]:
-        _travel(final, p, max_len)
+        x0, y0 = final[-1]
+        pieces = math.ceil(math.hypot(p[0] - x0, p[1] - y0) / max_len)
+        if pieces > 1:
+            shift = ((count % 3) - 1) * 0.12
+            count += 1
+            for i in range(1, pieces):
+                f = (i + shift) / pieces
+                final.append((x0 + (p[0] - x0) * f, y0 + (p[1] - y0) * f))
         final.append(p)
     return final
 
@@ -1197,9 +1288,41 @@ class _Router:
         return [tuple(c) for c in line.coords]
 
 
-def digitize(labels, palette, s: Settings):
+def _applique_runs(polys, s, pen):
+    """Applique, the way commercial software sews it:
+      1. placement line: shows where to lay the applique fabric       -> machine stops
+      2. tack-down: holds the fabric just inside that line            -> machine stops (trim the fabric)
+      3. cover: satin over the raw edge
+    The inside of the shape is the applique fabric itself, so it isn't filled."""
+    rings = _rings(polys)
+    shape = unary_union(polys)
+    runs, pen = _line_runs(rings, "running", 0.0, pen, s)
+    runs.append(STOP_MARK)
+    tack_rings = _rings([q for q in _polygons_of(shape.buffer(-0.5)) if q.area > 1.0]) or rings
+    tack, pen = _line_runs(tack_rings, "running", 0.0, pen, s)
+    runs += tack
+    runs.append(STOP_MARK)
+    cover, pen = _line_runs(rings, "satin", s.applique_width_mm, pen, s)
+    runs += cover
+    return runs, pen
+
+
+def _knockdown_runs(polys, center, pen):
+    """Knockdown: a very open cross-hatch, slightly larger than the design, sewn first. It presses
+    towel loops and fleece pile flat so the real stitches don't sink in."""
+    runs = []
+    area = unary_union([q.buffer(1.0) for q in polys])
+    for part in _polygons_of(area):
+        for angle in (45, 135):
+            new, pen = _fill_rows(_scan_poly(part, center, angle, 1.8), 1.8, 3.0, 1.0, 1.0, pen)
+            runs += new
+    return runs, pen
+
+
+def digitize(labels, palette, s: Settings, groups=None):
     """Builds the stitch pattern. Returns (pattern, sources): sources[i] is the palette index
-    sewn by thread i, or "outline"."""
+    sewn by thread i, or "outline". `groups[i]` lists the color keys behind palette[i]; a color
+    whose key is in Settings.applique is sewn as applique."""
     H, W = labels.shape
     center = (W * PX_MM / 2.0, H * PX_MM / 2.0)
 
@@ -1213,6 +1336,11 @@ def digitize(labels, palette, s: Settings):
         if not polys:
             continue
         all_polys += polys
+        keys = set(groups[ci]) if groups else set()
+        if s.applique and (tuple(rgb) in s.applique or keys & set(s.applique)):
+            runs, pen = _applique_runs(polys, s, pen)
+            blocks.append((rgb, runs, ci, None))
+            continue
         wide, narrow = _split_narrow(polys, satin_width, s.min_area_mm2)
         # grow wide areas by the pull compensation: stitching pulls the fabric in, and the growth
         # also overlaps neighbouring colors slightly so no fabric shows between them
@@ -1244,7 +1372,7 @@ def digitize(labels, palette, s: Settings):
                 new, pen = done
                 runs += new
         if s.edge != "none" and runs:
-            edge, pen = _line_runs(_rings(polys), s.edge, s.edge_width_mm, pen, s)
+            edge, pen = _line_runs(_rings(polys), s.edge, s.edge_width_mm, pen, s, shape=unary_union(polys))
             runs += edge
         if runs:
             blocks.append((rgb, runs, ci, unary_union(polys)))
@@ -1252,26 +1380,37 @@ def digitize(labels, palette, s: Settings):
     if s.outline != "none" and blocks:
         union = unary_union([p.buffer(max(0.0, s.outline_offset_mm)) for p in all_polys])
         shell = [Polygon(p.exterior) for p in _polygons_of(union)]  # outer edge only, holes ignored
-        runs, pen = _line_runs(_rings(shell), s.outline, s.outline_width_mm, pen, s)
+        runs, pen = _line_runs(_rings(shell), s.outline, s.outline_width_mm, pen, s, shape=unary_union(shell))
         if runs:
             blocks.append((tuple(s.outline_color), runs, "outline", None))
 
     if not blocks:
         raise ValueError("Nothing to stitch. Try more colors, or turn off background removal.")
 
+    if s.knockdown:  # sewn first, in the first thread
+        knock, _ = _knockdown_runs(all_polys, center, None)
+        rgb, runs, source, region = blocks[0]
+        blocks[0] = (rgb, knock + runs, source, None)
+
     def units(p):  # mm -> embroidery units, design centered on the origin
         return (p[0] - center[0]) * UNITS_PER_MM, (p[1] - center[1]) * UNITS_PER_MM
 
     pattern = EmbPattern()
-    for rgb, runs, _, region in blocks:
-        if pattern.threadlist:
-            pattern.trim()
-            pattern.color_change()
+    sources = []  # palette index (or "outline") of every thread, in order
+
+    def add_thread(rgb, source):
         thread = EmbThread()
         thread.set_color(*rgb)
         thread.description = nearest_brother_thread(rgb)[1]
         thread.brand = "Brother"
         pattern.add_thread(thread)
+        sources.append(source)
+
+    for rgb, runs, source, region in blocks:
+        if pattern.threadlist:
+            pattern.trim()
+            pattern.color_change()
+        add_thread(rgb, source)
 
         # Moving to the next part of the same color: if a straight path stays inside this color's
         # shapes, sew small running stitches along it (hidden in the same-color stitching) instead
@@ -1283,6 +1422,14 @@ def digitize(labels, palette, s: Settings):
             router = _Router(inside)
         last = None
         for run in runs:
+            if isinstance(run, str):  # STOP_MARK: the machine pauses (applique fabric steps)
+                # written the way Brother's own applique files do it: a thread change to the same
+                # color, so the machine stops and simply asks for the same thread again
+                pattern.trim()
+                pattern.color_change()
+                add_thread(rgb, source)
+                last = None
+                continue
             run = _tidy(run)
             if len(run) < 2:
                 continue
@@ -1306,7 +1453,7 @@ def digitize(labels, palette, s: Settings):
             last = run[-1]
     pattern.trim()
     pattern.end()
-    return pattern, [source for _, _, source, _ in blocks]
+    return pattern, sources
 
 
 # --------------------------------------------------------------------------- output
@@ -1353,7 +1500,7 @@ def describe(pattern: EmbPattern) -> dict:
 
 def convert(img: Image.Image, s: Settings) -> Result:
     labels, palette, groups, skipped = reduce_colors(img, s)
-    pattern, sources = digitize(labels, palette, s)
+    pattern, sources = digitize(labels, palette, s, groups)
     info = describe(pattern)
     threads = []
     for thread, source in zip(info["threads"], sources):
