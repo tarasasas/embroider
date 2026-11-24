@@ -72,12 +72,17 @@ struct PCClient {
         guard let png = Self.pngData(image) else { throw PCError.rejected("Could not prepare the image.") }
         var colors: [String: String] = [:]
         for (i, c) in recolor { colors[String(i)] = String(format: "#%02x%02x%02x", c.r, c.g, c.b) }
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "image": png.base64EncodedString(),
             "width_mm": settings.widthMM, "height_mm": settings.heightMM,
             "colors": settings.colors, "remove_background": settings.removeBackground, "bold_mm": settings.boldMM,
             "fabric": fabric, "edge": edge, "outline": outline, "recolor": colors,
         ]
+        if let style = settings.letteringStyle {
+            body["fill_type"] = style.fill
+            body["edge"] = style.edge ?? edge
+            body["applique_all"] = style == .applique
+        }
         var request = URLRequest(url: try url("/convert"), timeoutInterval: 180)
         request.httpMethod = "POST"
         request.setValue(token.trimmingCharacters(in: .whitespaces), forHTTPHeaderField: "X-Token")
@@ -90,6 +95,9 @@ struct PCClient {
               let pes = (json["pes"] as? String).flatMap({ Data(base64Encoded: $0) }),
               let preview = (json["preview"] as? String).flatMap({ Data(base64Encoded: $0) }).flatMap({ UIImage(data: $0) })
         else { throw PCError.rejected("The PC sent back something unexpected.") }
+        if settings.letteringStyle?.requiresPC == true, json["lettering_styles"] as? Bool != true {
+            throw PCError.rejected("Update and restart the PC server to use this stitch style.")
+        }
 
         let threads: [ThreadColor] = (json["threads"] as? [[String: Any]] ?? []).map {
             ThreadColor(r: $0["r"] as? Int ?? 0, g: $0["g"] as? Int ?? 0, b: $0["b"] as? Int ?? 0,

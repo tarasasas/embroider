@@ -1,249 +1,371 @@
+import CoreText
 import SwiftUI
 import UIKit
 
-/// A font installed on the phone, offered on the lettering page.
-struct LetteringFont: Identifiable, Hashable {
-    let name: String        // shown to the user, e.g. "Georgia Bold"
-    let postScript: String  // UIFont name
+/// A font available to the lettering editor.
+struct LetteringFont: Identifiable {
+    let name: String
+    let postScript: String
+    let category: String
     var id: String { postScript }
     var initial: String {
         let first = name.prefix(1).uppercased()
         return first.rangeOfCharacter(from: .letters) == nil ? "#" : first
     }
 
-    /// Icon / symbol fonts: their letters aren't letters, so they're left out.
-    private static let symbolFamilies = ["Zapf Dingbats", "Bodoni Ornaments", "Apple Color Emoji", "Apple Symbols", "Symbol"]
+    private static let symbolFamilies: Set<String> = [
+        "Zapf Dingbats", "Bodoni Ornaments", "Apple Color Emoji", "Apple Symbols", "Symbol",
+    ]
 
-    /// Every font on the phone, A to Z, named "Family Style" (just "Family" for the regular one).
     static let all: [LetteringFont] = {
-        var out: [LetteringFont] = []
-        for family in UIFont.familyNames.sorted() where !symbolFamilies.contains(family) {
-            for ps in UIFont.fontNames(forFamilyName: family) {
-                guard let font = UIFont(name: ps, size: 12) else { continue }
-                let face = (font.fontDescriptor.object(forKey: .face) as? String) ?? ""
-                let plain = face.isEmpty || ["Regular", "Roman", "Normal", "Book", "Plain"].contains(face)
-                out.append(LetteringFont(name: plain ? family : "\(family) \(face)", postScript: ps))
+        var bundled: [String: String] = [:]
+        if let folders = Bundle.main.resourceURL?.appendingPathComponent("fonts", isDirectory: true),
+           let data = try? Data(contentsOf: folders.appendingPathComponent("categories.json")),
+           let categories = try? JSONDecoder().decode([String: String].self, from: data) {
+            for (file, category) in categories {
+                let url = folders.appendingPathComponent(file) as CFURL
+                CTFontManagerRegisterFontsForURL(url, .process, nil)
+                let descriptors = CTFontManagerCreateFontDescriptorsFromURL(url) as? [CTFontDescriptor] ?? []
+                for descriptor in descriptors {
+                    if let name = CTFontDescriptorCopyAttribute(descriptor, kCTFontNameAttribute) as? String {
+                        bundled[name] = category
+                    }
+                }
             }
         }
-        return out.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-    }()
 
-    /// The letters that have at least one font, for the A-Z wheel.
-    static let initials: [String] = {
-        var seen: [String] = []
-        for f in all where !seen.contains(f.initial) { seen.append(f.initial) }
-        return seen
-    }()
-}
-
-/// Draws text as a transparent image the digitizer can turn into stitches.
-enum LetteringRenderer {
-    static let pointSize: CGFloat = 240
-
-    static func render(text: String, font: UIFont, color: UIColor, alignment: NSTextAlignment,
-                       letterSpacing: CGFloat, lineSpacing: CGFloat) -> UIImage? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = alignment
-        paragraph.lineSpacing = lineSpacing
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font, .foregroundColor: color, .kern: letterSpacing, .paragraphStyle: paragraph,
-        ]
-        let string = NSAttributedString(string: trimmed, attributes: attributes)
-        let options: NSStringDrawingOptions = [.usesLineFragmentOrigin, .usesFontLeading]
-        let bounds = string.boundingRect(with: CGSize(width: 20_000, height: 20_000), options: options, context: nil).integral
-        let pad = font.pointSize * 0.35  // room for script swashes that reach past the glyph box
-        let size = CGSize(width: bounds.width + 2 * pad, height: bounds.height + 2 * pad)
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        format.opaque = false
-        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
-            string.draw(with: CGRect(x: pad, y: pad, width: bounds.width, height: bounds.height),
-                        options: options, context: nil)
+        var names = Set(bundled.keys)
+        for family in UIFont.familyNames where !symbolFamilies.contains(family) {
+            names.formUnion(UIFont.fontNames(forFamilyName: family))
         }
-    }
+        return names.compactMap { name -> LetteringFont? in
+            guard let font = UIFont(name: name, size: 12) else { return nil }
+            let face = font.fontDescriptor.object(forKey: .face) as? String ?? ""
+            let plain = ["", "Regular", "Roman", "Normal", "Book", "Plain"].contains(face)
+            let label = plain ? font.familyName : "\(font.familyName) \(face)"
+            return LetteringFont(name: label, postScript: name, category: bundled[name] ?? "System")
+        }.sorted {
+            let comparison = $0.name.localizedCaseInsensitiveCompare($1.name)
+            return comparison == .orderedSame ? $0.id < $1.id : comparison == .orderedAscending
+        }
+    }()
+
+    static let categories = ["All"] + Set(all.map(\.category)).sorted()
 }
 
-/// Lettering, laid out like Artspira's character picker: a big preview on top, the text, and a
-/// two-column wheel (A-Z on the left jumps the font list; every font name is written in its own font).
 struct LetteringView: View {
-    /// The hoop's sewing field in mm; the text is sized to fit it with a margin.
     let hoopMM: (w: Double, h: Double)
-    let onUse: (UIImage) -> Void
+    let pcConfigured: Bool
+    @Binding var savedDraft: LetteringDraft
+    let motifOnly: Bool
+    let onUse: (UIImage, LetteringStitchStyle, Int) -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("letteringText") private var text = "Bears"
-    @AppStorage("letteringFont") private var fontName = "Georgia-Bold"
-    @State private var alignment = 1  // 0 left, 1 center, 2 right
-    @State private var letterSpacing = 4.0
-    @State private var lineSpacing = 20.0
-    @State private var threadColor = Color.black
+    @AppStorage("letteringText") private var savedText = "Bears"
+    @AppStorage("letteringFont") private var savedFont = "Georgia-Bold"
+    @State private var draft: LetteringDraft
+    @State private var category = "All"
+    @State private var search = ""
+    @State private var selectedLetter: Int?
+    @State private var previousText = ""
     @State private var showStyle = false
+    @State private var showMotif = false
     @FocusState private var editing: Bool
 
+    init(hoopMM: (w: Double, h: Double), pcConfigured: Bool, draft: Binding<LetteringDraft>,
+         motifOnly: Bool = false, onUse: @escaping (UIImage, LetteringStitchStyle, Int) -> Void) {
+        self.hoopMM = hoopMM
+        self.pcConfigured = pcConfigured
+        self._savedDraft = draft
+        self._draft = State(initialValue: draft.wrappedValue)
+        self.motifOnly = motifOnly
+        self.onUse = onUse
+    }
+
     private var font: UIFont {
-        UIFont(name: fontName, size: LetteringRenderer.pointSize)
+        _ = LetteringFont.all   // register bundled fonts before resolving the saved selection
+        return UIFont(name: draft.fontName, size: LetteringRenderer.pointSize)
             ?? UIFont.systemFont(ofSize: LetteringRenderer.pointSize, weight: .heavy)
     }
 
-    private var rendered: UIImage? {
-        LetteringRenderer.render(text: text, font: font, color: UIColor(threadColor),
-                                 alignment: [NSTextAlignment.left, .center, .right][alignment],
-                                 letterSpacing: letterSpacing, lineSpacing: lineSpacing)
-    }
-
-    /// Roughly how tall capital letters come out when the text fills the hoop (in inches).
-    private func capitalHeight(_ image: UIImage) -> Double {
-        let boxW = hoopMM.w - 10, boxH = hoopMM.h - 10
-        let pad = Double(font.pointSize * 0.35)
-        let inkW = max(1, Double(image.size.width) - 2 * pad), inkH = max(1, Double(image.size.height) - 2 * pad)
-        let mmPerPoint = min(boxW / inkW, boxH / inkH)  // the app crops the empty margin, then fits the box
-        return Double(font.capHeight) * mmPerPoint / 25.4
-    }
-
-    /// The A-Z wheel follows the font wheel; turning it jumps to the first font with that letter.
-    private var letter: Binding<String> {
-        Binding(
-            get: { LetteringFont.all.first { $0.postScript == fontName }?.initial ?? "A" },
-            set: { newLetter in
-                if let first = LetteringFont.all.first(where: { $0.initial == newLetter }) {
-                    fontName = first.postScript
-                }
-            }
-        )
+    private var matchingFonts: [LetteringFont] {
+        LetteringFont.all.filter {
+            (category == "All" || $0.category == category)
+                && (search.isEmpty || $0.name.localizedCaseInsensitiveContains(search))
+        }
     }
 
     var body: some View {
+        let selectedFont = motifOnly ? UIFont.systemFont(ofSize: LetteringRenderer.pointSize) : font
+        let image = LetteringRenderer.render(draft, font: selectedFont, motifOnly: motifOnly)
         NavigationStack {
             VStack(spacing: 0) {
-                preview
+                preview(image, font: selectedFont)
                 Divider()
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        TextField("Your text", text: $text, axis: .vertical)
-                            .focused($editing)
-                            .font(.system(size: 20, weight: .semibold))
-                            .lineLimit(1...4)
-                            .padding(12)
-                            .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
-                        fontWheel
-                        DisclosureGroup("Style", isExpanded: $showStyle) { styleControls }
-                            .padding(12)
-                            .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
+                Form {
+                    if !motifOnly {
+                        Section {
+                            TextField("Your text", text: $draft.text, axis: .vertical)
+                                .focused($editing)
+                                .font(.system(size: 20, weight: .semibold))
+                                .lineLimit(1...4)
+                            letterTargets
+                            fontWheel
+                            DisclosureGroup("Style", isExpanded: $showStyle) { styleControls }
+                        }
                     }
-                    .padding()
+                    Section {
+                        if motifOnly {
+                            motifControls
+                        } else {
+                            DisclosureGroup("Motif", isExpanded: $showMotif) { motifControls }
+                        }
+                    }
+                    Section {
+                        Picker("Stitch style", selection: $draft.stitch) {
+                            ForEach(LetteringStitchStyle.allCases) { style in
+                                Text(style.title).tag(style)
+                            }
+                        }
+                    } footer: {
+                        if draft.stitch.requiresPC && !pcConfigured {
+                            Text("Connect to the PC server to use this stitch style.")
+                        } else if draft.stitch == .auto && !pcConfigured {
+                            Text("The phone uses fill stitches. Auto uses satin and fill when connected to the PC.")
+                        }
+                    }
                 }
             }
-            .navigationTitle("Lettering")
+            .navigationTitle(motifOnly ? "Motifs" : "Lettering")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
-                        if let image = rendered {
-                            onUse(image)
-                            dismiss()
+                        guard let image else { return }
+                        if !motifOnly {
+                            savedText = draft.text
+                            savedFont = draft.fontName
                         }
+                        savedDraft = draft
+                        onUse(image, draft.stitch, LetteringRenderer.colorCount(draft, motifOnly: motifOnly))
+                        dismiss()
                     }
                     .bold()
-                    .disabled(rendered == nil)
+                    .disabled(image == nil || (draft.stitch.requiresPC && !pcConfigured))
                 }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
                     Button("Hide keyboard") { editing = false }
                 }
             }
+            .onAppear {
+                previousText = draft.text
+                if !motifOnly { selectMatchingFont() }
+            }
+            .onChange(of: draft.text) { text in
+                draft.remapLetterFonts(from: previousText)
+                previousText = text
+                selectedLetter = nil
+            }
+            .onChange(of: category) { _ in selectMatchingFont() }
+            .onChange(of: search) { _ in selectMatchingFont() }
         }
     }
 
-    // MARK: - Sections
+    private func selectMatchingFont() {
+        let matches = matchingFonts
+        if !matches.contains(where: { $0.id == targetFont.wrappedValue }), let first = matches.first {
+            targetFont.wrappedValue = first.id
+        }
+    }
 
-    private var preview: some View {
-        VStack(spacing: 6) {
-            ZStack {
-                Color(.systemGray6)
-                if let image = rendered {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .padding(18)
+    private var targetFont: Binding<String> {
+        Binding(
+            get: { selectedLetter.flatMap { draft.letterFonts[$0] } ?? draft.fontName },
+            set: { font in
+                if let selectedLetter {
+                    draft.letterFonts[selectedLetter] = font == draft.fontName ? nil : font
                 } else {
-                    Text("Type something below").foregroundStyle(.secondary)
+                    draft.fontName = font
                 }
             }
-            .frame(height: 230)
-            if let image = rendered {
-                let cap = capitalHeight(image)
-                Group {
-                    if cap < 0.25 {
-                        Label(String(format: "Capitals about %.2f in tall: too small to stitch cleanly", cap),
-                              systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                    } else {
-                        Label(String(format: "Capitals about %.2f in tall when it fills the hoop", cap),
-                              systemImage: "ruler")
-                            .foregroundStyle(.secondary)
+        )
+    }
+
+    private var letterTargets: some View {
+        let characters = Array(draft.text)
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("Apply font to").font(.subheadline)
+            ScrollView(.horizontal) {
+                HStack(spacing: 6) {
+                    targetButton("Default", index: nil)
+                    ForEach(characters.indices.filter { !characters[$0].isWhitespace }, id: \.self) { index in
+                        targetButton(String(characters[index]), index: index)
                     }
                 }
-                .font(.footnote)
-                .padding(.bottom, 6)
+            }
+            if let selectedLetter, draft.letterFonts[selectedLetter] != nil {
+                Button("Use default font for this letter") { draft.letterFonts[selectedLetter] = nil }
+                    .buttonStyle(.borderless)
             }
         }
-        .background(Color(.systemGray6))
+    }
+
+    private func targetButton(_ label: String, index: Int?) -> some View {
+        let face = index.flatMap { draft.letterFonts[$0] } ?? draft.fontName
+        return Button {
+            editing = false
+            selectedLetter = index
+            category = "All"
+            search = ""
+        } label: {
+            Text(label)
+                .font(index == nil ? .body : .custom(face, size: 20))
+                .padding(.horizontal, 8)
+                .frame(minWidth: 36, minHeight: 36)
+                .background(selectedLetter == index ? Color.accentColor.opacity(0.2) : Color(.tertiarySystemFill),
+                            in: RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(index.map { "Character \($0 + 1), \(label)" } ?? "Default font")
+        .accessibilityAddTraits(selectedLetter == index ? .isSelected : [])
+    }
+
+    private func preview(_ image: UIImage?, font: UIFont) -> some View {
+        VStack(spacing: 6) {
+            ZStack {
+                Color(.systemGray5)
+                if let image {
+                    Image(uiImage: image).resizable().scaledToFit().padding(18)
+                        .accessibilityLabel("Design preview")
+                } else {
+                    Text(motifOnly ? "Choose a motif" : "Type something below").foregroundStyle(.secondary)
+                }
+            }
+            .frame(height: 185)
+            if let image, !motifOnly, draft.shape == .straight, draft.letterFonts.isEmpty,
+               !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let ink = image.size
+                let cap = Double(font.capHeight) * min((hoopMM.w - 10) / ink.width, (hoopMM.h - 10) / ink.height) / 25.4
+                Label(String(format: "Capitals about %.2f in tall when the design fills the hoop", cap),
+                      systemImage: cap < 0.25 ? "exclamationmark.triangle.fill" : "ruler")
+                    .foregroundStyle(cap < 0.25 ? Color.orange : Color.secondary)
+                    .font(.footnote)
+                    .padding(.bottom, 6)
+            }
+        }
+        .background(Color(.systemGray5))
     }
 
     private var fontWheel: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Font").font(.headline)
-            HStack(spacing: 0) {
-                Picker("Letter", selection: letter) {
-                    ForEach(LetteringFont.initials, id: \.self) { l in
-                        Text(l).font(.title3).tag(l)
-                    }
-                }
-                .pickerStyle(.wheel)
-                .frame(width: 64)
-                .clipped()
-                Picker("Font", selection: $fontName) {
-                    ForEach(LetteringFont.all) { f in
-                        Text(f.name)  // each font's name, written in that font
-                            .font(.custom(f.postScript, size: 22))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.5)
-                            .tag(f.postScript)
-                    }
-                }
-                .pickerStyle(.wheel)
-                .frame(maxWidth: .infinity)
-                .clipped()
+        let fonts = matchingFonts
+        let initials = Array(Set(fonts.map(\.initial))).sorted()
+        let letter = Binding(
+            get: { fonts.first { $0.id == targetFont.wrappedValue }?.initial ?? initials.first ?? "#" },
+            set: { initial in
+                if let first = fonts.first(where: { $0.initial == initial }) { targetFont.wrappedValue = first.id }
             }
-            .frame(height: 190)
-            Text("Bold fonts stitch best. Thin scripts need to be sewn bigger.")
-                .font(.footnote).foregroundStyle(.secondary)
+        )
+        return VStack(alignment: .leading, spacing: 4) {
+            Picker("Font category", selection: $category) {
+                ForEach(LetteringFont.categories, id: \.self) { Text($0).tag($0) }
+            }
+            TextField("Search fonts", text: $search)
+            if fonts.isEmpty {
+                Text("No matching fonts").foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 0) {
+                    Picker("Initial", selection: letter) {
+                        ForEach(initials, id: \.self) { Text($0).tag($0) }
+                    }
+                    .pickerStyle(.wheel)
+                    .frame(width: 50)
+                    .clipped()
+                    Picker("Font", selection: targetFont) {
+                        ForEach(fonts) { font in
+                            Text(font.name)
+                                .font(.custom(font.postScript, size: 20))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.5)
+                                .tag(font.id)
+                        }
+                    }
+                    .pickerStyle(.wheel)
+                    .frame(maxWidth: .infinity)
+                    .clipped()
+                }
+                .frame(height: 150)
+            }
         }
     }
 
     private var styleControls: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Picker("Alignment", selection: $alignment) {
-                Image(systemName: "text.alignleft").tag(0)
-                Image(systemName: "text.aligncenter").tag(1)
-                Image(systemName: "text.alignright").tag(2)
+            Picker("Shape", selection: $draft.shape) {
+                ForEach(LetteringShape.allCases) { Text($0.rawValue).tag($0) }
             }
-            .pickerStyle(.segmented)
-            ColorPicker("Thread color", selection: $threadColor, supportsOpacity: false)
-            VStack(alignment: .leading) {
-                Text("Letter spacing").font(.subheadline)
-                Slider(value: $letterSpacing, in: -10...40)
+            if draft.shape != .straight && draft.shape != .circle {
+                slider("Bend", value: $draft.bend, in: 0...1)
             }
-            VStack(alignment: .leading) {
-                Text("Line spacing").font(.subheadline)
-                Slider(value: $lineSpacing, in: 0...120)
+            if draft.shape == .straight || draft.shape == .slant {
+                Picker("Alignment", selection: $draft.alignment) {
+                    Image(systemName: "text.alignleft").accessibilityLabel("Left").tag(0)
+                    Image(systemName: "text.aligncenter").accessibilityLabel("Center").tag(1)
+                    Image(systemName: "text.alignright").accessibilityLabel("Right").tag(2)
+                }
+                .pickerStyle(.segmented)
+                slider("Line spacing", value: $draft.lineSpacing, in: 0...120)
             }
-            Text("A little extra letter spacing keeps letters from merging when stitched.")
-                .font(.footnote).foregroundStyle(.secondary)
+            slider("Letter spacing", value: $draft.letterSpacing, in: -10...40)
+            ColorPicker("Letter color", selection: colorBinding($draft.threadColor), supportsOpacity: false)
+            effectControls("Outline", effect: $draft.outline, amount: "Width")
+            effectControls("Second outline", effect: $draft.outside, amount: "Width")
+            effectControls("Drop shadow", effect: $draft.shadow, amount: "Offset")
         }
         .padding(.top, 8)
+    }
+
+    private var motifControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if LetteringRenderer.motifs.isEmpty {
+                Text("Motifs are unavailable.").foregroundStyle(.secondary)
+            } else {
+                Picker("Motif", selection: $draft.motif) {
+                    if !motifOnly { Text("None").tag("") }
+                    ForEach(LetteringRenderer.motifs.keys.sorted(), id: \.self) { Text($0).tag($0) }
+                }
+                if !draft.motif.isEmpty {
+                    ColorPicker("Motif color", selection: colorBinding($draft.motifColor), supportsOpacity: false)
+                    if !motifOnly {
+                        Picker("Placement", selection: $draft.placement) {
+                            ForEach(MotifPlacement.allCases) { Text($0.rawValue).tag($0) }
+                        }
+                        slider("Motif size", value: $draft.motifScale, in: 0.25...1.5)
+                    }
+                }
+            }
+        }
+    }
+
+    private func slider(_ title: String, value: Binding<Double>, in range: ClosedRange<Double>) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.subheadline)
+            Slider(value: value, in: range) { Text(title) }
+        }
+    }
+
+    private func effectControls(_ title: String, effect: Binding<LetteringEffect>, amount: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(title, isOn: effect.enabled)
+            if effect.wrappedValue.enabled {
+                ColorPicker("\(title) color", selection: colorBinding(effect.color), supportsOpacity: false)
+                slider(amount, value: effect.amount, in: 0.02...0.14)
+            }
+        }
+    }
+
+    private func colorBinding(_ color: Binding<UIColor>) -> Binding<Color> {
+        Binding(get: { Color(uiColor: color.wrappedValue) }, set: { color.wrappedValue = UIColor($0) })
     }
 }

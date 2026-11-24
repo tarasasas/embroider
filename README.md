@@ -12,7 +12,7 @@ pip install -r requirements.txt
 python app.py
 ```
 
-1. **Open image...** (or **Lettering...** to type words): the app generates a first version right away.
+1. Choose **Open image...**, **Lettering...**, or **Motifs...**. In either editor, **Use design** generates the first stitch preview.
 2. Pick your **hoop** and **fabric**. The fabric sets the stitch density, pull compensation and the rest for you, and shows the stabilizer to use. Change the number of **thread colors** if needed, then click **Generate stitches**.
 3. Look at the **Stitch preview** tab (realistic thread on a knit fabric; set **Shirt color** to see it on your shirt) and the thread list. The list shows the closest Brother thread name for each color, in sewing order. Click a color swatch to change that thread's color. The **Sew simulation** tab plays the stitching in machine order, in the same realistic style: underlay first, then fills, satin, travel and trims, with a pause at each thread change.
 4. **Save embroidery file...** to write a `.pes`. Copy it to a USB stick, or send it to the machine over USB or wireless.
@@ -39,6 +39,10 @@ made by the same engine as the desktop app, so they are identical.
 The phone and PC must be on the same Wi-Fi network, and the PC must be on (not asleep). The phone
 cannot wake or launch the PC. If the PC can't be reached, the app makes a simpler version on the phone.
 The link is plain HTTP on your home network, protected only by the pairing code, so don't use it on public Wi-Fi.
+
+**Add lettering** and **Add motif** open the iPhone editors. The phone can generate fill stitches
+on its own. Satin, sketch, bean, and appliqué use the PC engine. Restart the PC server after
+updating it to use these styles from the phone.
 
 An iPhone version (SwiftUI) is in `ios/`. See `.github/workflows/ios.yml`; it builds an unsigned IPA you can sideload.
 

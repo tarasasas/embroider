@@ -75,6 +75,11 @@ struct ContentView: View {
     @State private var showAdvanced = false
     @State private var showPC = false
     @State private var showLettering = false
+    @State private var showMotifs = false
+    @State private var letteringDraft = LetteringDraft()
+    @State private var motifDraft = LetteringDraft(motif: "Star")
+    @State private var photoRemoveBackground: Bool?
+    @State private var artworkColorCount = 0
     @State private var lockRatio = true   // keep width x height in the image's proportions
     @State private var aspect = 1.0       // image width / height
 
@@ -109,7 +114,13 @@ struct ContentView: View {
                     } label: {
                         Label("Add lettering", systemImage: "textformat")
                     }
+                    Button {
+                        showMotifs = true
+                    } label: {
+                        Label("Add motif", systemImage: "star")
+                    }
                 }
+                .disabled(busy)
 
                 if let design {
                     Section("Stitch preview") {
@@ -242,7 +253,14 @@ struct ContentView: View {
             .navigationTitle("Embroidery")
         }
         .sheet(isPresented: $showLettering) {
-            LetteringView(hoopMM: hoop.sizeMM) { img in useImage(img) }
+            LetteringView(hoopMM: hoop.sizeMM, pcConfigured: pcConfigured, draft: $letteringDraft) { img, style, colors in
+                useImage(img, style: style, colors: colors)
+            }
+        }
+        .sheet(isPresented: $showMotifs) {
+            LetteringView(hoopMM: hoop.sizeMM, pcConfigured: pcConfigured, draft: $motifDraft, motifOnly: true) { img, style, colors in
+                useImage(img, style: style, colors: colors)
+            }
         }
         .onChange(of: pickerItem) { item in
             guard let item else { return }
@@ -324,8 +342,20 @@ struct ContentView: View {
     }
 
     /// Starts a new design from a picture (a photo, or lettering drawn on the lettering page).
-    private func useImage(_ img: UIImage) {
+    private func useImage(_ img: UIImage, style: LetteringStitchStyle? = nil, colors: Int = 0) {
+        design = nil
+        fileURL = nil
+        recolorTask?.cancel()
+        if style != nil {
+            if photoRemoveBackground == nil { photoRemoveBackground = settings.removeBackground }
+            settings.removeBackground = false
+        } else if let previous = photoRemoveBackground {
+            settings.removeBackground = previous
+            photoRemoveBackground = nil
+        }
         image = img
+        artworkColorCount = colors
+        settings.letteringStyle = style
         aspect = img.size.width / max(1, img.size.height)
         applyAutomatic()
         fitToHoop()
@@ -408,11 +438,16 @@ struct ContentView: View {
         let fabricName = fabric.rawValue
         let edgeType = edge, outlineType = outline
         let overrides = recolor
+        let editorColors = artworkColorCount
         let client = pcConfigured ? PCClient(host: pcHost, token: pcCode) : nil
         busy = true
         errorText = nil
         notice = nil
         Task {
+            defer {
+                busy = false
+                if image !== img { generate() }
+            }
             var made: Design?
             if let client {
                 do {
@@ -423,21 +458,34 @@ struct ContentView: View {
                     case .rejected(let message):
                         errorText = message  // a real problem with the image: the phone won't do better
                     default:
-                        notice = "\(error.localizedDescription) Made a simpler version on the phone instead."
+                        if s.letteringStyle?.requiresPC == true {
+                            errorText = error.localizedDescription
+                        } else {
+                            notice = "\(error.localizedDescription) Made a simpler version on the phone instead."
+                        }
                     }
                 } catch {
-                    notice = "PC connection failed. Made a simpler version on the phone instead."
+                    if s.letteringStyle?.requiresPC == true {
+                        errorText = error.localizedDescription
+                    } else {
+                        notice = "PC connection failed. Made a simpler version on the phone instead."
+                    }
                 }
             }
             if made == nil && errorText == nil {
-                made = await convertOnPhone(img, s)
+                if s.letteringStyle?.requiresPC == true {
+                    errorText = "Connect to the PC server to use this stitch style."
+                } else {
+                    var local = s
+                    if local.colors == 0 { local.colors = editorColors }
+                    made = await convertOnPhone(img, local)
+                }
             }
-            if let made {
+            if let made, image === img {
                 design = made
                 if made.heightMM > 0 { aspect = made.widthMM / made.heightMM }  // lock follows the design itself
                 writeFile(made.pes)
             }
-            busy = false
         }
     }
 

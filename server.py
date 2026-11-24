@@ -84,6 +84,7 @@ def build_settings(request):
     s.remove_background = bool(request.get("remove_background", True))
     s.bold_mm = _num(request, "bold_mm", 0.0, 0.0, 1.0)
     s.brother_colors = bool(request.get("brother_colors", True))
+    s.applique_all = request.get("applique_all") is True
     for key, allowed in (("fill_type", dz.FILL_TYPES), ("edge", dz.LINE_TYPES), ("outline", dz.LINE_TYPES)):
         if request.get(key) in allowed:
             setattr(s, key, request[key])
@@ -122,6 +123,7 @@ def convert_request(request):
         "preview": base64.b64encode(preview.getvalue()).decode(),
         "width_mm": info["width_mm"], "height_mm": info["height_mm"],
         "stitches": info["stitches"], "minutes": info["minutes"], "threads": threads,
+        "lettering_styles": True,
     }
 
 

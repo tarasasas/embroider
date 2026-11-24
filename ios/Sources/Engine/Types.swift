@@ -6,6 +6,25 @@ let MIN_STITCH_MM = 0.4  // shorter stitches just knot the thread
 
 typealias Pt = SIMD2<Double>
 
+enum LetteringStitchStyle: String, CaseIterable, Identifiable {
+    case auto, tatami, satin, sketch, bean, applique
+
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .auto: return "Auto (satin + fill)"
+        case .tatami: return "Fill"
+        case .satin: return "Satin"
+        case .sketch: return "Sketch (running outline)"
+        case .bean: return "Bean (triple outline)"
+        case .applique: return "Appliqué"
+        }
+    }
+    var requiresPC: Bool { self != .auto && self != .tatami }
+    var fill: String { self == .sketch || self == .bean ? "none" : self == .tatami || self == .satin ? rawValue : "auto" }
+    var edge: String? { self == .sketch ? "running" : self == .bean ? "triple" : nil }
+}
+
 struct Settings {
     var widthMM = 90.0
     var heightMM = 90.0
@@ -21,6 +40,7 @@ struct Settings {
     var underlay = true
     var trimMM = 1.0             // jumps longer than this get a trim
     var minAreaMM2 = 1.0         // smaller regions are skipped
+    var letteringStyle: LetteringStitchStyle?
 }
 
 enum StitchCommand {

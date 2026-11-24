@@ -4,6 +4,7 @@ import os
 import queue
 import threading
 import tkinter as tk
+from difflib import SequenceMatcher
 from tkinter import colorchooser, filedialog, messagebox, ttk
 from tkinter import font as tkfont
 
@@ -28,8 +29,31 @@ MM_PER_INCH = 25.4
 DEFAULT_FABRIC = "T-shirt / knit"
 
 
+def register_bundled_fonts():
+    """Makes the fonts in fonts/ usable by this program (Windows, private to the app), so the font
+    list can show their names in their own fonts."""
+    try:
+        import ctypes
+        for name in os.listdir(dz.BUNDLED_FONTS):
+            if name.lower().endswith((".ttf", ".otf")):
+                ctypes.windll.gdi32.AddFontResourceExW(os.path.join(dz.BUNDLED_FONTS, name), 0x10, 0)  # FR_PRIVATE
+    except Exception:
+        pass
+
+
+STITCH_STYLES = {  # lettering stitch style -> settings
+    "Auto (satin + fill)": {"fill_type": "auto", "edge": "none", "applique_all": False},
+    "Satin": {"fill_type": "satin", "edge": "none", "applique_all": False},
+    "Fill": {"fill_type": "tatami", "edge": "none", "applique_all": False},
+    "Sketch (running outline)": {"fill_type": "none", "edge": "running", "applique_all": False},
+    "Bean (triple outline)": {"fill_type": "none", "edge": "triple", "applique_all": False},
+    "Appliqué": {"fill_type": "auto", "edge": "none", "applique_all": True},
+}
+
+
 class App(tk.Tk):
     def __init__(self):
+        register_bundled_fonts()
         super().__init__()
         self.title("Embroidery Converter")
         self.geometry("1280x900")
@@ -45,6 +69,9 @@ class App(tk.Tk):
         self.jobs = queue.Queue()
         self.color_edits = {}  # {color key: new rgb, or None = leave that color as bare fabric}
         self.applique = set()  # color keys sewn as applique
+        self.applique_all = tk.BooleanVar(value=False)  # set by the Applique lettering style
+        self.editor_draft = {}
+        self.previous_image_style = None
 
         d = dz.Settings()
         hoop = "4 x 4 in (100 x 100 mm)"
@@ -95,6 +122,8 @@ class App(tk.Tk):
         ttk.Button(buttons, text="Open image...", command=self.open_image).pack(side="left", expand=True, fill="x")
         ttk.Button(buttons, text="Lettering...", command=self.open_text).pack(side="left", expand=True, fill="x",
                                                                                 padx=(4, 0))
+        ttk.Button(buttons, text="Motifs...", command=lambda: self.open_text(motif_only=True)).pack(
+            side="left", expand=True, fill="x", padx=(4, 0))
         self.file_label = ttk.Label(side, text="No image loaded", foreground="#666", wraplength=300)
         self.file_label.pack(fill="x", pady=(4, 8))
 
@@ -252,7 +281,8 @@ class App(tk.Tk):
         self.stitch_len.set(d.stitch_length_mm)
         self.angle.set(d.fill_angle)
         self.trim.set(d.trim_mm)
-        self.fill_type.set(d.fill_type)
+        if self.previous_image_style is None:
+            self.fill_type.set(d.fill_type)
         self.tip.config(text=tip)
 
     # ------------------------------------------------------------------ images
@@ -293,66 +323,278 @@ class App(tk.Tk):
             return
         self._set_source(img, path, f"{os.path.basename(path)}  ({img.width} x {img.height} px)")
 
-    def open_text(self):
-        """Dialog to type words and pick a font; the text becomes the design."""
+    def open_text(self, motif_only=False):
+        """Lettering: text, font (each name in its own font), shape, outlines/shadow, stitch style,
+        with a live preview. The result becomes the design."""
         fonts = dz.list_fonts()
-        if not fonts:
+        if not fonts and not motif_only:
             messagebox.showerror("No fonts", "No TrueType fonts were found on this computer.")
             return
         win = tk.Toplevel(self)
-        win.title("Lettering")
+        win.title("Motifs" if motif_only else "Lettering")
         win.transient(self)
-        win.resizable(False, False)
+        win.grab_set()
+        draft = self.editor_draft.get(motif_only, {})
         frame = ttk.Frame(win, padding=12)
-        frame.pack()
-        ttk.Label(frame, text="Text (Enter for a new line)").grid(row=0, column=0, columnspan=2, sticky="w")
-        entry = tk.Text(frame, width=34, height=3, font=("Segoe UI", 11))
+        frame.pack(fill="both", expand=True)
+        left, right = ttk.Frame(frame), ttk.Frame(frame)
+        if not motif_only:
+            left.pack(side="left", fill="y")
+        right.pack(side="left", fill="both", expand=True, padx=(14 if not motif_only else 0, 0))
+
+        ttk.Label(left, text="Text (Enter for a new line)").grid(row=0, column=0, columnspan=2, sticky="w")
+        entry = tk.Text(left, width=34, height=3, font=("Segoe UI", 11))
         entry.grid(row=1, column=0, columnspan=2, pady=(2, 8))
-        entry.focus_set()
+        if not motif_only:
+            entry.insert("1.0", draft.get("text", "Bears"))
+            entry.focus_set()
         names = list(fonts)
-        default = next((n for n in names if n.lower().startswith("arial bold")), names[0])
-        font_var = tk.StringVar(value=default)
-        picker = self._font_picker(frame, fonts, font_var, entry)
-        picker.grid(row=2, column=0, columnspan=2, sticky="nsew")
-        rgb = [0, 0, 0]
-        swatch = tk.Label(frame, width=4, background="#000000", relief="solid", borderwidth=1)
+        default = next((n for n in names if n.lower().startswith("graduate")), None) or \
+            next((n for n in names if n.lower().startswith("arial bold")), next(iter(names), ""))
+        selected_font = tk.StringVar(value=draft.get("font", default))
+        default_font = selected_font.get()
+        letter_fonts = dict(draft.get("letter_fonts", {}))
+        previous_text = entry.get("1.0", "end-1c")
+        target_offsets = {}
+        target = tk.StringVar(value="Default font")
+        if not motif_only:
+            targets = ttk.Combobox(left, textvariable=target, state="readonly", width=14)
+            ttk.Label(left, text="Apply font to").grid(row=2, column=0, columnspan=2, sticky="w")
+            targets.grid(row=3, column=0, sticky="w", pady=(0, 6))
+            clear_letter = ttk.Button(left, text="Use default font", command=lambda: clear_letter_font())
+            clear_letter.grid(row=3, column=1, sticky="e", pady=(0, 6))
+            self._font_picker(left, fonts, selected_font, lambda name: choose_font(name)).grid(
+                row=4, column=0, columnspan=2, sticky="nsew")
 
-        def pick_color():
-            chosen = colorchooser.askcolor(color="#%02x%02x%02x" % tuple(rgb), parent=win)
+        opts = ttk.LabelFrame(right, text="Style", padding=(8, 4))
+        opts.pack(fill="x")
+        shape = tk.StringVar(value=draft.get("shape", "straight"))
+        bend = tk.DoubleVar(value=draft.get("bend", 0.5))
+        align = tk.StringVar(value=draft.get("align", "center"))
+        colors = {"text": (15, 30, 80), "outline": (230, 90, 20), "outline2": (255, 255, 255),
+                  "shadow": (60, 60, 60), "motif": (230, 90, 20)} | draft.get("colors", {})
+        use = {k: tk.BooleanVar(value=draft.get("use", {}).get(k, False)) for k in ("outline", "outline2", "shadow")}
+        width = {k: tk.DoubleVar(value=draft.get("width", {}).get(k, value))
+                 for k, value in (("outline", 0.06), ("outline2", 0.05), ("shadow", 0.05))}
+        style = tk.StringVar(value=draft.get("style", "Auto (satin + fill)"))
+        motifs = sorted(dz.motifs())
+        default_motif = ("Star" if "Star" in motifs else next(iter(motifs), "")) if motif_only else "None"
+        motif = tk.StringVar(value=draft.get("motif", default_motif))
+        placement = tk.StringVar(value=draft.get("placement", "Right"))
+        scale = tk.DoubleVar(value=draft.get("scale", 0.6))
+
+        if not motif_only:
+            ttk.Label(opts, text="Shape").grid(row=0, column=0, sticky="w", pady=2)
+            ttk.Combobox(opts, textvariable=shape, values=dz.TEXT_SHAPES, state="readonly", width=14).grid(
+                row=0, column=1, sticky="w", pady=2)
+            ttk.Label(opts, text="Bend").grid(row=1, column=0, sticky="w")
+            bend_slider = ttk.Scale(opts, from_=0, to=1, variable=bend, length=100)
+            bend_slider.grid(row=1, column=1, sticky="w")
+            align_picker = ttk.Combobox(opts, textvariable=align, values=("left", "center", "right"),
+                                        state="readonly", width=7)
+            ttk.Label(opts, text="Alignment").grid(row=9, column=0, sticky="w")
+            align_picker.grid(row=9, column=1, sticky="w")
+
+        swatches = {}
+
+        def pick(key):
+            chosen = colorchooser.askcolor(color="#%02x%02x%02x" % tuple(colors[key]), parent=win)
             if chosen and chosen[0]:
-                rgb[:] = [int(v) for v in chosen[0]]
-                swatch.config(background=chosen[1])
+                colors[key] = tuple(int(v) for v in chosen[0])
+                swatches[key].config(background=chosen[1])
+                if key in use:
+                    use[key].set(True)
+                refresh()
 
-        ttk.Button(frame, text="Thread color...", command=pick_color).grid(row=3, column=0, sticky="w", pady=8)
-        swatch.grid(row=3, column=1, sticky="w")
+        rows = [] if motif_only else [("text", "Letter color", None), ("outline", "Outline", "width"),
+                ("outline2", "Second outline (varsity)", "width"), ("shadow", "Drop shadow", "offset")]
+        for i, (key, label, what) in enumerate(rows, start=2):
+            if key in use:
+                ttk.Checkbutton(opts, text=label, variable=use[key], command=lambda: refresh()).grid(
+                    row=i, column=0, sticky="w", pady=2)
+            else:
+                ttk.Label(opts, text=label).grid(row=i, column=0, sticky="w", pady=2)
+            swatches[key] = tk.Button(opts, width=4, relief="solid", borderwidth=1, cursor="hand2",
+                                      background="#%02x%02x%02x" % tuple(colors[key]), command=lambda k=key: pick(k))
+            swatches[key].grid(row=i, column=1, sticky="w", pady=2)
+            if what:
+                ttk.Scale(opts, from_=0.02, to=0.14, variable=width[key], length=90,
+                          command=lambda v: refresh()).grid(row=i, column=2, sticky="w")
+
+        ttk.Label(opts, text="Stitch style").grid(row=6, column=0, sticky="w", pady=(8, 2))
+        ttk.Combobox(opts, textvariable=style, values=list(STITCH_STYLES), state="readonly", width=24).grid(
+            row=6, column=1, columnspan=2, sticky="w", pady=(8, 2))
+        ttk.Label(opts, text="Motif").grid(row=7, column=0, sticky="w")
+        ttk.Combobox(opts, textvariable=motif, state="readonly", width=14,
+                     values=motifs if motif_only else ["None", *motifs]).grid(row=7, column=1, sticky="w")
+        swatches["motif"] = tk.Button(opts, width=4, background="#%02x%02x%02x" % colors["motif"],
+                                      command=lambda: pick("motif"))
+        swatches["motif"].grid(row=7, column=2, sticky="w")
+        if not motif_only:
+            ttk.Label(opts, text="Motif placement / size").grid(row=8, column=0, sticky="w")
+            ttk.Combobox(opts, textvariable=placement, state="readonly", width=10,
+                         values=("Left", "Right", "Above", "Below")).grid(row=8, column=1, sticky="w")
+            ttk.Scale(opts, from_=0.25, to=1.5, variable=scale, length=90).grid(row=8, column=2, sticky="w")
+
+        preview = ttk.Label(right, background="#ebebeb", anchor="center")
+        preview.pack(fill="both", expand=True, pady=(10, 0))
+        state = {"job": None, "photo": None}
+
+        def make():
+            raw = entry.get("1.0", "end-1c")
+            text = raw.strip()
+            img = None
+            if text:
+                start = len(raw) - len(raw.lstrip())
+                img = dz.make_text_image(
+                    text, fonts[default_font], colors["text"], shape=shape.get(), bend=bend.get(), align=align.get(),
+                    letter_fonts={offset - start: fonts[name] for offset, name in letter_fonts.items()},
+                    outline=(colors["outline"], width["outline"].get()) if use["outline"].get() else None,
+                    outline2=(colors["outline2"], width["outline2"].get()) if use["outline2"].get() else None,
+                    shadow=(colors["shadow"], width["shadow"].get(), width["shadow"].get())
+                    if use["shadow"].get() else None)
+            if motif.get() in motifs:
+                img = dz.compose_motif(img, motif.get(), colors["motif"], placement.get(), scale.get())
+            box = img.getbbox() if img is not None else None
+            return img.crop(box) if box else None
+
+        def draw_preview():
+            state["job"] = None
+            try:
+                img = make()
+            except Exception as exc:
+                preview.config(image="", text=f"Can't draw this: {exc}")
+                use_design.config(state="disabled")
+                return
+            if img is None:
+                preview.config(image="", text="Choose a motif" if motif_only else "Type some text or choose a motif")
+                use_design.config(state="disabled")
+                return
+            shown = Image.new("RGB", img.size, (235, 235, 235))
+            shown.paste(img, (0, 0), img)
+            shown.thumbnail((460, 300))
+            state["photo"] = ImageTk.PhotoImage(shown)
+            preview.config(image=state["photo"], text="")
+            use_design.config(state="normal")
+
+        def refresh(*_):
+            if state["job"]:
+                win.after_cancel(state["job"])
+            state["job"] = win.after(250, draw_preview)
+
+        def shape_changed(*_):
+            bend_slider.config(state="disabled" if shape.get() in ("straight", "circle") else "normal")
+            align_picker.config(state="readonly" if shape.get() in ("straight", "slant") else "disabled")
+            refresh()
+
+        def choose_font(name):
+            nonlocal default_font
+            offset = target_offsets.get(target.get())
+            if offset is None:
+                default_font = name
+            elif name == default_font:
+                letter_fonts.pop(offset, None)
+            else:
+                letter_fonts[offset] = name
+            show_target()
+            refresh()
+
+        def clear_letter_font():
+            choose_font(default_font)
+
+        def show_target(_event=None):
+            offset = target_offsets.get(target.get())
+            selected_font.set(letter_fonts.get(offset, default_font))
+            clear_letter.config(state="normal" if offset in letter_fonts else "disabled")
+
+        def update_targets(text):
+            target_offsets.clear()
+            target_offsets.update((f"{index + 1}: {letter}", offset)
+                                  for index, (offset, letter) in enumerate(dz.text_letters(text))
+                                  if not letter.isspace())
+            targets.config(values=("Default font", *target_offsets))
+            targets.current(0)
+            show_target()
+
+        if not motif_only:
+            shape.trace_add("write", shape_changed)
+            targets.bind("<<ComboboxSelected>>", show_target)
+            update_targets(previous_text)
+        for var in (bend, align, motif, placement, scale):
+            var.trace_add("write", refresh)
+
+        def text_changed(_):
+            nonlocal previous_text, letter_fonts
+            if entry.edit_modified():
+                entry.edit_modified(False)
+                current = entry.get("1.0", "end-1c")
+                if current != previous_text:
+                    if letter_fonts:
+                        valid = dict(dz.text_letters(current))
+                        letter_fonts = {
+                            new + offset - old: name
+                            for old, new, size in SequenceMatcher(None, previous_text, current, autojunk=False)
+                            .get_matching_blocks()
+                            for offset, name in letter_fonts.items()
+                            if old <= offset < old + size and new + offset - old in valid
+                        }
+                    previous_text = current
+                    update_targets(current)
+                refresh()
+
+        entry.edit_modified(False)
+        entry.bind("<<Modified>>", text_changed)
 
         def ok():
-            text = entry.get("1.0", "end").strip()
-            if not text:
-                return
             try:
-                img = dz.make_text_image(text, fonts[font_var.get()], tuple(rgb))
+                img = make()
             except Exception as exc:
-                messagebox.showerror("Could not draw text", str(exc), parent=win)
+                messagebox.showerror("Could not draw design", str(exc), parent=win)
                 return
-            win.destroy()
-            self.remove_bg.set(True)
-            self._set_source(img, text.splitlines()[0][:20] or "text", f"Lettering: {text.splitlines()[0][:30]}")
+            if img is None:
+                return
+            text = entry.get("1.0", "end-1c")
+            name = (text.strip().splitlines()[0] if text.strip() else motif.get())[:30]
+            self.editor_draft[motif_only] = {
+                "text": text, "font": default_font, "letter_fonts": letter_fonts,
+                "shape": shape.get(), "bend": bend.get(), "align": align.get(),
+                "colors": colors, "use": {k: v.get() for k, v in use.items()},
+                "width": {k: v.get() for k, v in width.items()}, "style": style.get(),
+                "motif": motif.get(), "placement": placement.get(), "scale": scale.get(),
+            }
+            close()
+            kind = "Motif" if motif_only else "Lettering"
+            self._set_source(img, name, f"{kind}: {name}", style=style.get())
 
-        ttk.Button(frame, text="Use this text", command=ok).grid(row=4, column=0, columnspan=2, sticky="ew")
+        def close():
+            if state["job"]:
+                win.after_cancel(state["job"])
+            win.destroy()
+
+        use_design = ttk.Button(right, text="Use design", command=ok, state="disabled")
+        use_design.pack(fill="x", pady=(10, 0))
+        win.protocol("WM_DELETE_WINDOW", close)
+        win.bind("<Escape>", lambda e: close())
         win.bind("<Control-Return>", lambda e: ok())
+        win.keep = (state, colors, use, width, swatches)
+        if motif_only:
+            refresh()
+        else:
+            shape_changed()
 
     SYMBOL_FONTS = ("wingdings", "webdings", "marlett", "symbol", "mt extra", "mdl2", "fluent icons", "bookshelf")
 
-    def _font_picker(self, parent, fonts, font_var, entry):
-        """A searchable list where every font's name is written in that font. Picking one also shows
-        the typed text in it."""
+    def _font_picker(self, parent, fonts, font_var, select):
+        """A searchable list where every font's name is written in that font."""
         box = ttk.Frame(parent)
         ttk.Label(box, text="Font").grid(row=0, column=0, sticky="w")
         query = tk.StringVar()
         search = ttk.Entry(box, textvariable=query, width=24)
         search.grid(row=0, column=1, sticky="e", pady=(0, 4))
-        ttk.Label(box, text="search", foreground="#888").grid(row=0, column=2, sticky="w", padx=(4, 0))
+        categories = dz.font_categories()
+        category = tk.StringVar(value="All")
+        ttk.Combobox(box, textvariable=category, values=("All", *sorted(set(categories.values()))),
+                     state="readonly", width=11).grid(row=0, column=2, sticky="w", padx=(4, 0))
         listing = tk.Text(box, width=40, height=12, wrap="none", cursor="hand2", relief="solid", borderwidth=1,
                           padx=6, pady=4, spacing1=3, spacing3=3)
         bar = ttk.Scrollbar(box, orient="vertical", command=listing.yview)
@@ -381,28 +623,23 @@ class App(tk.Tk):
                     slant="italic" if ("italic" in st or "oblique" in st) else "roman")
             return tk_fonts[key]
 
-        def show_choice():
-            entry.configure(font=tk_font(font_var.get(), 16))  # the typed text, in the chosen font
+        def show_choice(*_):
             listing.tag_remove("chosen", "1.0", "end")
             ranges = listing.tag_ranges(tag_of[font_var.get()])
             if ranges:
                 listing.tag_add("chosen", ranges[0], f"{ranges[0]} lineend")
                 listing.see(ranges[0])
 
-        def choose(name):
-            font_var.set(name)
-            show_choice()
-
         def fill(*_):
             q = query.get().strip().lower()
             listing.configure(state="normal")
             listing.delete("1.0", "end")
             for name in fonts:
-                if q and q not in name.lower():
+                if q not in name.lower() or (category.get() != "All" and categories.get(name) != category.get()):
                     continue
                 tag = tag_of[name]
                 listing.tag_configure(tag, font=tk_font(name))
-                listing.tag_bind(tag, "<Button-1>", lambda e, n=name: choose(n))
+                listing.tag_bind(tag, "<Button-1>", lambda e, n=name: select(n))
                 listing.insert("end", name, tag)
                 if any(sym in name.lower() for sym in self.SYMBOL_FONTS):  # symbol fonts: say what they are
                     listing.insert("end", f"   ({name})", ("plain", tag))
@@ -413,13 +650,26 @@ class App(tk.Tk):
             show_choice()
 
         query.trace_add("write", fill)
+        category.trace_add("write", fill)
+        font_var.trace_add("write", show_choice)
         fill()
         # keep the fonts and the search variable alive as long as the list is shown (Tk drops a
         # font as soon as Python forgets it, and the list would fall back to a plain font)
-        box.keep = (tk_fonts, plain, query, fill, choose, tag_of)
+        box.keep = (tk_fonts, plain, query, category, fill, tag_of)
         return box
 
-    def _set_source(self, img, name, label):
+    def _set_source(self, img, name, label, style=None):
+        if style is not None:
+            if self.previous_image_style is None:
+                self.previous_image_style = {key: getattr(self, key).get() for key in STITCH_STYLES[style]}
+                self.previous_image_style["remove_bg"] = self.remove_bg.get()
+            for key, value in STITCH_STYLES[style].items():
+                getattr(self, key).set(value)
+            self.remove_bg.set(False)
+        elif self.previous_image_style is not None:
+            for key, value in self.previous_image_style.items():
+                getattr(self, key).set(value)
+            self.previous_image_style = None
         self.source, self.source_path, self.result = img, name, None
         self.color_edits = {}
         self.applique = set()
@@ -444,7 +694,7 @@ class App(tk.Tk):
                 bold_mm=min(max(float(self.bold.get()), 0.0), 1.0),
                 brother_colors=self.brother.get(), cleanup=int(self.cleanup.get()),
                 fill_type=self.fill_type.get(), fill_pattern=self.fill_pattern.get(),
-                knockdown=self.knockdown.get(), applique=set(self.applique),
+                knockdown=self.knockdown.get(), applique=set(self.applique), applique_all=self.applique_all.get(),
                 row_spacing_mm=float(self.spacing.get()),
                 satin_spacing_mm=float(self.satin_spacing.get()),
                 stitch_length_mm=float(self.stitch_len.get()), fill_angle=float(self.angle.get()),
@@ -486,22 +736,25 @@ class App(tk.Tk):
             try:
                 result = dz.convert(img, s)
                 previews = dz.color_preview(result.labels, result.palette), dz.render_preview(result.pattern, hoop_mm=hoop, **view)
-                self.jobs.put((result, previews, None))
+                self.jobs.put((img, result, previews, None))
             except Exception as exc:
-                self.jobs.put((None, None, exc))
+                self.jobs.put((img, None, None, exc))
 
         threading.Thread(target=work, daemon=True).start()
         self.after(100, self._poll)
 
     def _poll(self):
         try:
-            result, previews, error = self.jobs.get_nowait()
+            image, result, previews, error = self.jobs.get_nowait()
         except queue.Empty:
             self.after(100, self._poll)
             return
         self.busy = False
         self.config(cursor="")
         self.generate_btn.config(state="normal")
+        if image is not self.source:
+            self.generate()
+            return
         if error is not None:
             self.status.config(text=f"Error: {error}")
             return
@@ -558,6 +811,9 @@ class App(tk.Tk):
             if not outline:
                 t.insert("end", "skip", action)
                 t.tag_bind(action, "<Button-1>", lambda e, k=thread["keys"]: self._edit_colors(k, None))
+                if self.applique_all.get():
+                    t.insert("end", "  Appliqué\n")
+                    continue
                 appl = f"appl{i}"
                 is_appl = bool(set(thread["keys"]) & self.applique)
                 t.tag_configure(appl, foreground="#1a6fd1", underline=True)

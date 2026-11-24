@@ -20,6 +20,7 @@ Command line:
 from __future__ import annotations
 
 import argparse
+import json
 import io
 import math
 import heapq
@@ -27,7 +28,9 @@ from collections import deque
 import os
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
+from itertools import groupby
 from types import SimpleNamespace
+import unicodedata
 
 import numpy as np
 import shapely
@@ -66,7 +69,7 @@ FABRICS = {
                     "Firm tear-away backing. Keep designs under about 55 mm tall."),
 }
 
-FILL_TYPES = ("auto", "tatami", "satin")
+FILL_TYPES = ("auto", "tatami", "satin", "none")  # "none": no fill, only the edge lines (sketch / bean styles)
 LINE_TYPES = ("none", "running", "triple", "satin", "estitch")
 FILL_PATTERNS = ("brick3", "brick2", "brick4", "diagonal", "random")
 STOP_MARK = "STOP"  # placed in a run list: the machine pauses here (applique steps)
@@ -96,6 +99,7 @@ class Settings:
     fill_pattern: str = "brick3"  # needle-point offset between rows: brick2 / brick3 / brick4 / diagonal / random
     knockdown: bool = False  # sparse cross-hatch under the design that flattens towel / fleece pile
     applique: set = field(default_factory=set)  # color keys sewn as applique (placement, tack-down, satin cover)
+    applique_all: bool = False  # every color as applique (applique lettering)
     applique_width_mm: float = 3.0  # width of the satin that covers the applique fabric's raw edge
     pull_comp_mm: float = 0.15  # widens rows to offset fabric pull-in
     underlay: bool = True
@@ -177,10 +181,29 @@ def load_svg(path, long_side=3000) -> Image.Image:
     return img.crop(box)
 
 
+BUNDLED_FONTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+
+
+@lru_cache(maxsize=1)
+def font_categories() -> dict:
+    """{"Family Style": category} for the bundled fonts (Block, Varsity, Script, Serif, Monogram, Fun)."""
+    try:
+        with open(os.path.join(BUNDLED_FONTS, "categories.json"), encoding="utf-8") as file:
+            by_file = json.load(file)
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for name, path in list_fonts().items():
+        if os.path.dirname(path) == BUNDLED_FONTS and os.path.basename(path) in by_file:
+            out[name] = by_file[os.path.basename(path)]
+    return out
+
+
 @lru_cache(maxsize=1)
 def list_fonts() -> dict:
     """{"Family Style": path} for installed TrueType/OpenType fonts."""
     dirs = [
+        BUNDLED_FONTS,  # the free embroidery fonts that come with the app (fonts/)
         os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Windows", "Fonts"),
         "/Library/Fonts", os.path.expanduser("~/Library/Fonts"), "/usr/share/fonts/truetype",
@@ -204,17 +227,209 @@ def list_fonts() -> dict:
     return dict(sorted(fonts.items(), key=lambda kv: kv[0].lower()))
 
 
-def make_text_image(text, font_path, color=(0, 0, 0), size_px=300) -> Image.Image:
-    """Renders (multi-line) text as a transparent RGBA image, ready to digitize."""
-    font = ImageFont.truetype(font_path, size_px)
-    spacing, pad = size_px // 6, size_px // 8
-    probe = ImageDraw.Draw(Image.new("L", (1, 1)))
-    x0, y0, x1, y1 = probe.multiline_textbbox((0, 0), text, font=font, align="center", spacing=spacing)
-    x0, y0, x1, y1 = math.floor(x0), math.floor(y0), math.ceil(x1), math.ceil(y1)  # some fonts give floats
-    img = Image.new("RGBA", (x1 - x0 + 2 * pad, y1 - y0 + 2 * pad), (0, 0, 0, 0))
-    ImageDraw.Draw(img).multiline_text((pad - x0, pad - y0), text, font=font, fill=tuple(color) + (255,),
-                                       align="center", spacing=spacing)
-    return img
+TEXT_SHAPES = ("straight", "arc up", "arc down", "circle", "wave", "slant")
+
+@lru_cache(maxsize=1)
+def motifs():
+    with open(os.path.join(os.path.dirname(__file__), "motifs.json"), encoding="utf-8") as file:
+        return json.load(file)
+
+
+def compose_motif(text_image, name, color, placement, scale):
+    """Place a motif beside, above or below the ink, or render it on its own."""
+    box = text_image.getbbox() if text_image is not None else None
+    side = max(1, round(300 * scale)) if box else 300
+    motif = Image.new("RGBA", (side, side))
+    ImageDraw.Draw(motif).polygon(
+        [(round(x * (side - 1)), round(y * (side - 1))) for x, y in motifs()[name]], fill=tuple(color) + (255,))
+    if box is None:
+        return motif
+    ink = text_image.crop(box)
+    w, h = ink.size
+    gap = 24
+    if placement in ("Left", "Right"):
+        canvas = Image.new("RGBA", (w + side + gap, max(h, side)))
+        text_x, motif_x = (side + gap, 0) if placement == "Left" else (0, w + gap)
+        canvas.alpha_composite(ink, (text_x, (canvas.height - h) // 2))
+        canvas.alpha_composite(motif, (motif_x, (canvas.height - side) // 2))
+    else:
+        canvas = Image.new("RGBA", (max(w, side), h + side + gap))
+        text_y, motif_y = (side + gap, 0) if placement == "Above" else (0, h + gap)
+        canvas.alpha_composite(ink, ((canvas.width - w) // 2, text_y))
+        canvas.alpha_composite(motif, ((canvas.width - side) // 2, motif_y))
+    return canvas
+
+
+def text_letters(text):
+    """Yield source offsets and letters, keeping combining marks attached."""
+    start, letter = 0, ""
+    for index, char in enumerate(text):
+        if letter and not (unicodedata.category(char).startswith("M") or char == "\u200d" or letter.endswith("\u200d")):
+            yield start, letter
+            start, letter = index, ""
+        letter += char
+    if letter:
+        yield start, letter
+
+
+def make_text_image(text, font_path, color=(0, 0, 0), size_px=300, shape="straight", bend=0.5,
+                    outline=None, outline2=None, shadow=None, align="center", letter_fonts=None) -> Image.Image:
+    """Renders lettering as a transparent RGBA image, ready to digitize.
+
+    shape: straight / arc up / arc down / circle / wave / slant (shapes other than straight and
+    slant use one line); bend 0-1 sets how strong the shape is.
+    outline / outline2: (rgb, width as a fraction of the letter size) for a border, and a second
+    border outside it (varsity look). shadow: (rgb, dx, dy) with offsets as fractions of the size.
+    Every effect is a separate color, so it becomes its own thread.
+    letter_fonts assigns optional font paths keyed by character offset in text.
+    """
+    @lru_cache(maxsize=None)
+    def load_face(path):
+        return ImageFont.truetype(path, size_px)
+
+    font = load_face(font_path)
+    letter_fonts = letter_fonts or {}
+    glyphs = [(letter, font if letter.isspace() else load_face(letter_fonts.get(offset, font_path)))
+              for offset, letter in text_letters(text)]
+    o1 = max(1, round(outline[1] * size_px)) if outline else 0
+    o2 = o1 + (max(1, round(outline2[1] * size_px)) if outline2 else 0)
+    layers = []  # (rgb, stroke width, (dx, dy)), drawn back to front
+    if shadow:
+        layers.append((tuple(shadow[0]), o2, (round(shadow[1] * size_px), round(shadow[2] * size_px))))
+    if outline2:
+        layers.append((tuple(outline2[0]), o2, (0, 0)))
+    if outline:
+        layers.append((tuple(outline[0]), o1, (0, 0)))
+    layers.append((tuple(color), 0, (0, 0)))
+    reach = o2 + max([abs(v) for _, _, off in layers for v in off] + [0])
+    spacing = size_px // 6
+
+    def block(glyphs):
+        """All layers of a piece of text, tightly cropped (plus a margin)."""
+        pad = size_px // 8 + reach
+        if any(face is not font for _, face in glyphs):
+            lines = [[]]
+            for letter, face in glyphs:
+                if letter == "\n":
+                    lines.append([])
+                else:
+                    lines[-1].append((letter, face))
+            line_runs = []
+            for line in lines:
+                runs = []
+                x = 0
+                for face, group in groupby(line, key=lambda pair: pair[1]):
+                    value = "".join(letter for letter, _ in group)
+                    runs.append((value, face, x))
+                    x += face.getlength(value)
+                line_runs.append((x, runs))
+            width = max(w for w, _ in line_runs)
+            metrics = [face.getmetrics() for _, face in glyphs]
+            step = max(a for a, _ in metrics) + max(d for _, d in metrics) + spacing
+            layout = []
+            for row, (w, runs) in enumerate(line_runs):
+                start = {"left": 0, "center": (width - w) / 2, "right": width - w}[align]
+                layout.extend((value, face, start + x, row * step) for value, face, x in runs)
+            bounds = [(x + a, y + b, x + c, y + d) for value, face, x, y in layout
+                      for a, b, c, d in [face.getbbox(value, anchor="ls", stroke_width=o2)]]
+            left = math.floor(min(box[0] for box in bounds))
+            top = math.floor(min(box[1] for box in bounds))
+            right = math.ceil(max(box[2] for box in bounds))
+            bottom = math.ceil(max(box[3] for box in bounds))
+            img = Image.new("RGBA", (right - left + 2 * pad, bottom - top + 2 * pad))
+            draw = ImageDraw.Draw(img)
+            for rgb, stroke, (dx, dy) in layers:
+                for value, face, x, y in layout:
+                    draw.text((pad + x - left + dx, pad + y - top + dy), value, font=face, anchor="ls",
+                              fill=rgb + (255,), stroke_width=stroke, stroke_fill=rgb + (255,))
+            return img
+
+        txt = "".join(letter for letter, _ in glyphs)
+        probe = ImageDraw.Draw(Image.new("L", (1, 1)))
+        x0, y0, x1, y1 = probe.multiline_textbbox((0, 0), txt, font=font, align=align, spacing=spacing,
+                                                  stroke_width=o2)
+        x0, y0, x1, y1 = math.floor(x0), math.floor(y0), math.ceil(x1), math.ceil(y1)  # some fonts give floats
+        img = Image.new("RGBA", (x1 - x0 + 2 * pad, y1 - y0 + 2 * pad), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        for rgb, sw, (dx, dy) in layers:
+            d.multiline_text((pad - x0 + dx, pad - y0 + dy), txt, font=font, fill=rgb + (255,), align=align,
+                             spacing=spacing, stroke_width=sw, stroke_fill=rgb + (255,))
+        return img
+
+    if shape == "slant":
+        img = block(glyphs)
+        k = 0.15 + 0.45 * bend  # shear: tops lean right
+        w, h = img.size
+        extra = int(k * h)
+        return img.transform((w + extra, h), Image.AFFINE, (1, k, -extra, 0, 1, 0), resample=Image.BICUBIC)
+    line = []
+    for whitespace, group in groupby(glyphs, key=lambda pair: pair[0].isspace()):
+        if not whitespace:
+            if line:
+                line.append((" ", font))
+            line.extend(group)
+    if shape == "straight" or len(line) < 2:
+        return block(glyphs if shape == "straight" else line)
+    if shape == "wave":
+        # bend the whole word smoothly (column by column), so script letters stay joined
+        img = block(line)
+        w, h = img.size
+        amp = size_px * (0.08 + 0.3 * bend)
+        wavelength = max(w / 1.5, size_px * 3)
+        out_h = int(h + 2 * amp)
+        mesh, step = [], 8
+        for x0 in range(0, w, step):
+            x1 = min(w, x0 + step)
+            off0 = amp * math.sin(2 * math.pi * x0 / wavelength)
+            off1 = amp * math.sin(2 * math.pi * x1 / wavelength)
+            mesh.append(((x0, 0, x1, out_h), (x0, -amp - off0, x0, out_h - amp - off0,
+                                              x1, out_h - amp - off1, x1, -amp - off1)))
+        return img.transform((w, out_h), Image.MESH, mesh, resample=Image.BICUBIC)
+
+    # Curved shapes: every letter is drawn on its own tile with the baseline at the tile's centre,
+    # then rotated about that point and placed along the curve.
+    height = max(sum(face.getmetrics()) for _, face in line)
+    side = int(2 * (height + reach) + size_px)
+    advances = [face.getlength(ch) for ch, face in line]
+    total = sum(advances)
+    if total <= 0:
+        return block(line)
+
+    def tile_for(ch, face, adv):
+        tile = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+        d = ImageDraw.Draw(tile)
+        for rgb, sw, (dx, dy) in layers:
+            d.text((side / 2 - adv / 2 + dx, side / 2 + dy), ch, font=face, fill=rgb + (255,), anchor="ls",
+                   stroke_width=sw, stroke_fill=rgb + (255,))
+        return tile
+
+    sweep = math.radians(330 if shape == "circle" else 40 + 220 * bend)
+    if shape != "circle":
+        sweep = min(sweep, total / ((3.5 if shape == "arc down" else 1.2) * size_px))
+    radius = max(size_px * 0.35, total / sweep) if shape == "circle" else total / sweep
+    placed = []
+    cursor = -total / 2
+    for (ch, face), advance in zip(line, advances):
+        a = (cursor + advance / 2) * sweep / total
+        cursor += advance
+        direction = -1 if shape == "arc down" else 1
+        placed.append((ch, face, advance, radius * math.sin(a), -direction * radius * math.cos(a),
+                       -direction * math.degrees(a)))
+
+    xs = [x for _, _, _, x, _, _ in placed]
+    ys = [y for _, _, _, _, y, _ in placed]
+    margin = side
+    W = int(max(xs) - min(xs) + 2 * margin)
+    H = int(max(ys) - min(ys) + 2 * margin)
+    canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    for ch, face, advance, x, y, deg in placed:
+        turned = tile_for(ch, face, advance).rotate(deg, resample=Image.BICUBIC)
+        canvas.alpha_composite(turned, (int(x - min(xs) + margin - side / 2), int(y - min(ys) + margin - side / 2)))
+    box = canvas.getbbox()
+    if box is None:
+        return canvas
+    pad = size_px // 8
+    return canvas.crop((max(0, box[0] - pad), max(0, box[1] - pad), min(W, box[2] + pad), min(H, box[3] + pad)))
 
 
 # --------------------------------------------------------------------------- colors
@@ -1405,7 +1620,7 @@ def digitize(labels, palette, s: Settings, groups=None):
     H, W = labels.shape
     center = (W * PX_MM / 2.0, H * PX_MM / 2.0)
 
-    satin_width = {"auto": s.satin_max_mm, "satin": 12.0, "tatami": 0.0}[s.fill_type]
+    satin_width = {"auto": s.satin_max_mm, "satin": 12.0, "tatami": 0.0, "none": 0.0}[s.fill_type]
     pen, blocks, all_polys = None, [], []
     shapes = [_mask_polygons(labels == ci, s.min_area_mm2) if (labels == ci).any() else [] for ci in range(len(palette))]
     if s.bold_mm > 0:  # bolder lines: grow every shape outward (rounded), then tidy the outline
@@ -1417,16 +1632,22 @@ def digitize(labels, palette, s: Settings, groups=None):
             continue
         all_polys += polys
         keys = set(groups[ci]) if groups else set()
-        if s.applique and (tuple(rgb) in s.applique or keys & set(s.applique)):
+        if s.applique_all or (s.applique and (tuple(rgb) in s.applique or keys & set(s.applique))):
             runs, pen = _applique_runs(polys, s, pen)
             blocks.append((rgb, runs, ci, None))
+            continue
+        own = unary_union(polys)
+        if s.fill_type == "none":
+            if s.edge != "none":
+                runs, pen = _line_runs(_rings(polys), s.edge, s.edge_width_mm, pen, s, shape=own)
+                if runs:
+                    blocks.append((rgb, runs, ci, None))  # travel through the unfilled interior would show
             continue
         wide, narrow = _split_narrow(polys, satin_width, s.min_area_mm2)
         # grow wide areas by the pull compensation: stitching pulls the fabric in, and the growth
         # also overlaps neighbouring colors slightly so no fabric shows between them
         # ... and 1.6 mm more where they meet this color's satin columns (Brother overlaps ~2 mm), so the two overlap instead of
         # just touching (on stretchy fabric touching pieces pull apart and show a gap)
-        own = unary_union(polys)
         same_color = own.buffer(s.pull_comp_mm)
         # growing two nearby shapes can fuse them across a thin white gap; keep such gaps open
         bridges = own.buffer(s.pull_comp_mm).buffer(-s.pull_comp_mm).difference(own)
@@ -1466,10 +1687,10 @@ def digitize(labels, palette, s: Settings, groups=None):
                 new, pen = done
                 runs += new
         if s.edge != "none" and runs:
-            edge, pen = _line_runs(_rings(polys), s.edge, s.edge_width_mm, pen, s, shape=unary_union(polys))
+            edge, pen = _line_runs(_rings(polys), s.edge, s.edge_width_mm, pen, s, shape=own)
             runs += edge
         if runs:
-            blocks.append((rgb, runs, ci, unary_union(polys)))
+            blocks.append((rgb, runs, ci, own))
 
     if s.outline != "none" and blocks:
         union = unary_union([p.buffer(max(0.0, s.outline_offset_mm)) for p in all_polys])
@@ -1481,7 +1702,7 @@ def digitize(labels, palette, s: Settings, groups=None):
     if not blocks:
         raise ValueError("Nothing to stitch. Try more colors, or turn off background removal.")
 
-    if s.knockdown:  # sewn first, in the first thread
+    if s.knockdown and s.fill_type != "none":  # sewn first, in the first thread
         knock, _ = _knockdown_runs(all_polys, center, None)
         rgb, runs, source, region = blocks[0]
         blocks[0] = (rgb, knock + runs, source, None)

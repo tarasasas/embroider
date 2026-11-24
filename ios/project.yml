@@ -14,6 +14,11 @@ targets:
     platform: iOS
     sources:
       - Sources
+      - path: ../fonts
+        type: folder
+        buildPhase: resources
+      - path: ../motifs.json
+        buildPhase: resources
     info:
       path: Info.plist
       properties:
