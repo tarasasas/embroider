@@ -11,7 +11,8 @@ from PIL import Image, ImageTk
 import digitizer as dz
 from simulator import SewSimulator
 
-IMAGE_TYPES = [("Images", "*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff"), ("All files", "*.*")]
+IMAGE_TYPES = [("Images and vector logos", "*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff *.svg"),
+               ("All files", "*.*")]
 SAVE_TYPES = [
     ("Brother PES", "*.pes"),
     ("Tajima DST", "*.dst"),
@@ -40,6 +41,7 @@ class App(tk.Tk):
         self.photos = {}
         self.canvases = {}
         self.jobs = queue.Queue()
+        self.color_edits = {}  # {color key: new rgb, or None = leave that color as bare fabric}
 
         d = dz.Settings()
         hoop = "4 x 4 in (100 x 100 mm)"
@@ -321,6 +323,7 @@ class App(tk.Tk):
 
     def _set_source(self, img, name, label):
         self.source, self.source_path, self.result = img, name, None
+        self.color_edits = {}
         self.aspect = img.width / max(1, img.height)
         self._fit_to_hoop()
         shown = Image.new("RGBA", img.size, (244, 244, 244, 255))
@@ -344,7 +347,7 @@ class App(tk.Tk):
                 satin_spacing_mm=float(self.satin_spacing.get()),
                 stitch_length_mm=float(self.stitch_len.get()), fill_angle=float(self.angle.get()),
                 pull_comp_mm=float(self.pull.get()), underlay=self.underlay.get(), trim_mm=float(self.trim.get()),
-                edge=self.edge.get(), outline=self.outline.get(),
+                edge=self.edge.get(), outline=self.outline.get(), color_edits=dict(self.color_edits),
             )
         except (tk.TclError, ValueError):
             messagebox.showerror("Invalid setting", "Please enter a number in every settings box.")
@@ -423,35 +426,59 @@ class App(tk.Tk):
         t.config(state="normal")
         t.delete("1.0", "end")
         for tag in t.tag_names():
-            if tag.startswith("swatch"):
+            if tag.startswith(("swatch", "action")):
                 t.tag_delete(tag)
         if threads:
-            t.insert("end", "Thread order (click a swatch to change its color):\n")
+            t.insert("end", "Thread order. Click a swatch to change a color (same colors merge "
+                            "into one thread); 'skip' leaves that color as bare fabric.\n")
         for i, thread in enumerate(threads, 1):
-            tag = f"swatch{i}"
+            tag, action = f"swatch{i}", f"action{i}"
             t.tag_configure(tag, background=thread["hex"])
+            t.tag_configure(action, foreground="#1a6fd1", underline=True)
             t.insert("end", f"{i:>2}. ")
+            for name in (tag, action):
+                t.tag_bind(name, "<Enter>", lambda e: t.config(cursor="hand2"))
+                t.tag_bind(name, "<Leave>", lambda e: t.config(cursor="arrow"))
             if thread.get("skipped"):
-                t.insert("end", " skip ")
-                t.insert("end", f"  {thread['name'] or thread['hex']}  (background, not stitched)\n")
+                t.insert("end", "      ", tag)
+                t.insert("end", f"  {thread['name'] or thread['hex']}: not stitched  ")
+                t.insert("end", "stitch it", action)
+                t.tag_bind(action, "<Button-1>", lambda e, k=thread["keys"]: self._edit_colors(k, "reset"))
+                t.insert("end", "\n")
                 continue
             t.insert("end", "      ", tag)
-            t.tag_bind(tag, "<Button-1>", lambda e, n=i - 1: self._recolor(n))
-            t.tag_bind(tag, "<Enter>", lambda e: t.config(cursor="hand2"))
-            t.tag_bind(tag, "<Leave>", lambda e: t.config(cursor="arrow"))
-            outline = " [outline]" if thread.get("kind") == "outline" else ""
-            t.insert("end", f"  {thread['name'] or thread['hex']}  ({thread['hex']}){outline}\n")
+            outline = thread.get("kind") == "outline"
+            t.tag_bind(tag, "<Button-1>", (lambda e, n=i - 1: self._recolor_outline(n)) if outline
+                       else (lambda e, th=thread: self._pick_color(th)))
+            t.insert("end", f"  {thread['name'] or thread['hex']}  ({thread['hex']})"
+                            f"{' [outline]' if outline else ''}  ")
+            if not outline:
+                t.insert("end", "skip", action)
+                t.tag_bind(action, "<Button-1>", lambda e, k=thread["keys"]: self._edit_colors(k, None))
+            t.insert("end", "\n")
         t.config(state="disabled")
 
-    def _recolor(self, index):
-        """Changes one thread's color after conversion. The stitches stay the same."""
+    def _pick_color(self, thread):
+        chosen = colorchooser.askcolor(color=thread["hex"], title="Thread color", parent=self)
+        if chosen and chosen[0]:
+            self._edit_colors(thread["keys"], tuple(int(v) for v in chosen[0]))
+
+    def _edit_colors(self, keys, value):
+        """Recolors (value = rgb), skips (None) or restores ("reset") the colors in `keys`, then redoes
+        the stitches so identical colors are sewn as one thread."""
         if self.result is None or self.busy:
             return
+        for key in keys:
+            if value == "reset":
+                self.color_edits.pop(key, None)
+            else:
+                self.color_edits[key] = value
+        self.generate()
+
+    def _recolor_outline(self, index):
+        """The outline isn't an image color: change its thread directly. The stitches stay the same."""
         pattern, threads = self.result.pattern, self.result.threads
-        if index >= len(pattern.threadlist):
-            return
-        current = threads[index]["hex"]
-        chosen = colorchooser.askcolor(color=current, title="Thread color", parent=self)
+        chosen = colorchooser.askcolor(color=threads[index]["hex"], title="Outline color", parent=self)
         if not chosen or not chosen[0]:
             return
         rgb = tuple(int(v) for v in chosen[0])
@@ -460,8 +487,7 @@ class App(tk.Tk):
         thread.description = dz.nearest_brother_thread(rgb)[1]
         for entry in (threads[index], self.result.info["threads"][index]):
             entry.update(rgb=rgb, hex=dz.hex_color(rgb), name=thread.description)
-        hoop = dz.HOOPS.get(self.hoop.get())
-        self.images["stitches"] = dz.render_preview(pattern, hoop_mm=hoop)
+        self.images["stitches"] = dz.render_preview(pattern, hoop_mm=dz.HOOPS.get(self.hoop.get()))
         self._set_threads(threads)
         self.sim.load(pattern)
         self.tabs.select(2)

@@ -17,6 +17,12 @@ python app.py
 3. Look at the **Stitch preview** tab and the thread list. The list shows the closest Brother thread name for each color, in sewing order. Click a color swatch to change that thread's color. The **Sew simulation** tab replays the stitching in machine order.
 4. **Save embroidery file...** to write a `.pes`. Copy it to a USB stick, or send it to the machine over USB or wireless.
 
+**Vector logos (.svg)** open directly and give the cleanest stitches: edges stay perfectly crisp at
+any size, and watermark layers that free logo sites add are removed. In the thread list, click a swatch
+to change a color (colors that end up the same are sewn as one thread), or click **skip** to leave that
+color as bare fabric. Example: for a two-color logo you want in black only, skip the second color and
+make the first one black.
+
 Sizes are in inches. Tick **Show advanced settings** for fill type (satin for narrow shapes, tatami for large areas), edges, outline and the stitch settings in millimetres.
 
 ## Using it from the iPhone app

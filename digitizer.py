@@ -20,6 +20,7 @@ Command line:
 from __future__ import annotations
 
 import argparse
+import io
 import math
 from collections import deque
 import os
@@ -114,9 +115,57 @@ class Result:
 
 
 def load_image(path) -> Image.Image:
+    if str(path).lower().endswith(".svg"):
+        return load_svg(path)
     img = Image.open(path)
     img = ImageOps.exif_transpose(img)
     return img.convert("RGBA")
+
+
+def _drop_watermarks(svg: str) -> str:
+    """Removes <g> groups whose id mentions "watermark" (free logo sites add one)."""
+    import re
+    while True:
+        m = re.search(r'<g\b[^>]*\bid="[^"]*watermark[^"]*"[^>]*>', svg, re.I)
+        if not m:
+            return svg
+        depth, end = 0, None
+        for tag in re.finditer(r"<g\b[^>]*?(/?)>|</g>", svg[m.start():]):
+            if tag.group().startswith("</"):
+                depth -= 1
+            elif not tag.group(1):  # not a self-closing <g/>
+                depth += 1
+            if depth == 0:
+                end = m.start() + tag.end()
+                break
+        if end is None:
+            return svg
+        svg = svg[:m.start()] + svg[end:]
+
+
+def load_svg(path, long_side=3000) -> Image.Image:
+    """Renders a vector (.svg) logo as a large, crisp transparent image, cropped to the art."""
+    try:
+        import resvg_py
+    except ImportError:
+        raise ValueError("Opening .svg files needs the resvg-py package: run  pip install resvg-py")
+    raw = open(path, "rb").read()
+    text = None
+    for enc in ("utf-8", "iso-8859-1"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    svg = _drop_watermarks(text)
+    probe = Image.open(io.BytesIO(bytes(resvg_py.svg_to_bytes(svg_string=svg))))
+    scale = long_side / max(probe.size)
+    png = resvg_py.svg_to_bytes(svg_string=svg, width=round(probe.width * scale), height=round(probe.height * scale))
+    img = Image.open(io.BytesIO(bytes(png))).convert("RGBA")
+    box = img.getbbox()
+    if box is None:
+        raise ValueError("The vector file is empty.")
+    return img.crop(box)
 
 
 @lru_cache(maxsize=1)
