@@ -53,6 +53,9 @@ HOOPS = {
     "8 x 12 in (200 x 300 mm)": (200, 300),
     "2.5 x 2.5 in (60 x 60 mm)": (60, 60),
 }
+LAYOUT_HOOP = "4 x 4 in (100 x 100 mm)"
+LAYOUT_SIZE_MM = HOOPS[LAYOUT_HOOP][0]
+LAYOUT_MARGIN_MM = 4.0
 
 # Fabric presets: settings to apply, and a stabilizer tip.
 FABRICS = {
@@ -80,6 +83,7 @@ WRITABLE = {".pes", ".pec", ".dst", ".jef", ".exp", ".vp3", ".xxx", ".u01"}
 class Settings:
     width_mm: float = 90.0  # the design is scaled to fit inside width x height
     height_mm: float = 90.0
+    fixed_hoop: bool = False  # preserve artwork position in the full 4 x 4 hoop
     rotate: int = 0  # clockwise degrees: 0, 90, 180 or 270
     mirror: bool = False
     colors: int = 4  # thread colors, not counting the removed background; 0 = choose automatically
@@ -612,8 +616,11 @@ def reduce_colors(img: Image.Image, s: Settings, _fit=True, _bg_lab=None):
         img = img.transpose({90: Image.ROTATE_270, 180: Image.ROTATE_180, 270: Image.ROTATE_90}[s.rotate % 360])
 
     w, h = img.size
-    mm_per_src_px = min(s.width_mm / w, s.height_mm / h)
-    size = (max(1, round(w * mm_per_src_px / PX_MM)), max(1, round(h * mm_per_src_px / PX_MM)))
+    if s.fixed_hoop:
+        size = (round(LAYOUT_SIZE_MM / PX_MM),) * 2
+    else:
+        mm_per_src_px = min(s.width_mm / w, s.height_mm / h)
+        size = (max(1, round(w * mm_per_src_px / PX_MM)), max(1, round(h * mm_per_src_px / PX_MM)))
     arr = np.asarray(img.resize(size, Image.LANCZOS))
 
     opaque = arr[..., 3] >= 128
@@ -666,7 +673,7 @@ def reduce_colors(img: Image.Image, s: Settings, _fit=True, _bg_lab=None):
 
     # The size the user asks for is the size of the stitched design, not of the picture: if the
     # picture has an empty margin around the art, crop it away and scale the art to fill the box.
-    if _fit:
+    if _fit and not s.fixed_hoop:
         ys, xs = np.nonzero(labels >= 0)
         if xs.size:
             art_w, art_h = (xs.max() - xs.min() + 1) * PX_MM, (ys.max() - ys.min() + 1) * PX_MM

@@ -76,6 +76,9 @@ struct ContentView: View {
     @State private var showPC = false
     @State private var showLettering = false
     @State private var showMotifs = false
+    @State private var showLayout = false
+    @State private var layoutItems: [HoopLayoutItem] = []
+    @State private var layoutStyle = LetteringStitchStyle.auto
     @State private var letteringDraft = LetteringDraft()
     @State private var motifDraft = LetteringDraft(motif: "Star")
     @State private var photoRemoveBackground: Bool?
@@ -118,6 +121,9 @@ struct ContentView: View {
                         showMotifs = true
                     } label: {
                         Label("Add motif", systemImage: "star")
+                    }
+                    Button { showLayout = true } label: {
+                        Label(settings.fixedHoop ? "Edit 4 × 4 layout" : "4 × 4 hoop layout", systemImage: "square.grid.2x2")
                     }
                 }
                 .disabled(busy)
@@ -164,16 +170,21 @@ struct ContentView: View {
                 }
 
                 Section {
-                    Picker("Hoop", selection: $hoop) {
-                        ForEach(Hoop.allCases) { Text($0.rawValue).tag($0) }
+                    if settings.fixedHoop {
+                        LabeledContent("Hoop", value: Hoop.fourByFour.rawValue)
+                    } else {
+                        Picker("Hoop", selection: $hoop) {
+                            ForEach(Hoop.allCases) { Text($0.rawValue).tag($0) }
+                        }
+                        Toggle("Lock width x height", isOn: $lockRatio)
+                        inchSlider("Width", Binding(get: { settings.widthMM }, set: { setWidth($0) }), maxMM: hoop.sizeMM.w)
+                        inchSlider("Height", Binding(get: { settings.heightMM }, set: { setHeight($0) }), maxMM: hoop.sizeMM.h)
                     }
-                    Toggle("Lock width x height", isOn: $lockRatio)
-                    inchSlider("Width", Binding(get: { settings.widthMM }, set: { setWidth($0) }), maxMM: hoop.sizeMM.w)
-                    inchSlider("Height", Binding(get: { settings.heightMM }, set: { setHeight($0) }), maxMM: hoop.sizeMM.h)
                 } header: {
                     Text("Size")
                 } footer: {
-                    Text("The design is scaled to fit inside this box and keeps its proportions. Stay a little under the hoop size.")
+                    Text(settings.fixedHoop ? "Edit individual sizes and positions in the hoop layout."
+                         : "The design is scaled to fit inside this box and keeps its proportions. Stay a little under the hoop size.")
                 }
 
                 Section {
@@ -182,7 +193,7 @@ struct ContentView: View {
                     }
                     Stepper(settings.colors == 0 ? "Thread colors: Auto" : "Thread colors: \(settings.colors)",
                             value: $settings.colors, in: 0...15)
-                    Toggle("Remove background", isOn: $settings.removeBackground)
+                    Toggle("Remove background", isOn: $settings.removeBackground).disabled(settings.fixedHoop)
                     VStack(alignment: .leading) {
                         Text(settings.boldMM < 0.05 ? "Bolder lines: off" : String(format: "Bolder lines: +%.1f mm", settings.boldMM))
                         Slider(value: $settings.boldMM, in: 0...1.0, step: 0.1)
@@ -253,13 +264,20 @@ struct ContentView: View {
             .navigationTitle("Embroidery")
         }
         .sheet(isPresented: $showLettering) {
-            LetteringView(hoopMM: hoop.sizeMM, pcConfigured: pcConfigured, draft: $letteringDraft) { img, style, colors in
+            LetteringView(hoopMM: hoop.sizeMM, pcConfigured: pcConfigured, draft: $letteringDraft) { img, style, colors, _ in
                 useImage(img, style: style, colors: colors)
             }
         }
         .sheet(isPresented: $showMotifs) {
-            LetteringView(hoopMM: hoop.sizeMM, pcConfigured: pcConfigured, draft: $motifDraft, motifOnly: true) { img, style, colors in
+            LetteringView(hoopMM: hoop.sizeMM, pcConfigured: pcConfigured, draft: $motifDraft, motifOnly: true) { img, style, colors, _ in
                 useImage(img, style: style, colors: colors)
+            }
+        }
+        .sheet(isPresented: $showLayout) {
+            HoopLayoutView(items: layoutItems, style: layoutStyle, pcConfigured: pcConfigured) { image, style, colors, items in
+                layoutItems = items
+                layoutStyle = style
+                useImage(image, style: style, colors: colors, fixedHoop: true)
             }
         }
         .onChange(of: pickerItem) { item in
@@ -317,7 +335,7 @@ struct ContentView: View {
             pattern.threads[i].g = rgb.g
             pattern.threads[i].b = rgb.b
             design!.pattern = pattern
-            design!.preview = Digitizer.preview(pattern)
+            design!.preview = Digitizer.preview(pattern, fixedHoop: settings.fixedHoop)
             design!.pes = PES.data(for: pattern)
             writeFile(design!.pes)
         }
@@ -342,7 +360,7 @@ struct ContentView: View {
     }
 
     /// Starts a new design from a picture (a photo, or lettering drawn on the lettering page).
-    private func useImage(_ img: UIImage, style: LetteringStitchStyle? = nil, colors: Int = 0) {
+    private func useImage(_ img: UIImage, style: LetteringStitchStyle? = nil, colors: Int = 0, fixedHoop: Bool = false) {
         design = nil
         fileURL = nil
         recolorTask?.cancel()
@@ -356,6 +374,7 @@ struct ContentView: View {
         image = img
         artworkColorCount = colors
         settings.letteringStyle = style
+        settings.fixedHoop = fixedHoop
         aspect = img.size.width / max(1, img.size.height)
         applyAutomatic()
         fitToHoop()
@@ -389,6 +408,11 @@ struct ContentView: View {
 
     /// Biggest design that fits the hoop with a margin (keeps the proportions if locked).
     private func fitToHoop() {
+        if settings.fixedHoop {
+            settings.widthMM = Hoop.fourByFour.sizeMM.w
+            settings.heightMM = Hoop.fourByFour.sizeMM.h
+            return
+        }
         var w = hoop.sizeMM.w - 10
         var h = hoop.sizeMM.h - 10
         if lockRatio {
@@ -477,7 +501,7 @@ struct ContentView: View {
                     errorText = "Connect to the PC server to use this stitch style."
                 } else {
                     var local = s
-                    if local.colors == 0 { local.colors = editorColors }
+                    if local.colors == 0 { local.colors = min(15, editorColors) }
                     made = await convertOnPhone(img, local)
                 }
             }
@@ -495,7 +519,7 @@ struct ContentView: View {
                 let r = try Digitizer.convert(img, s)
                 return Design(threads: r.pattern.threads, widthMM: r.widthMM, heightMM: r.heightMM,
                               stitchCount: r.stitchCount, minutes: r.minutes, pes: PES.data(for: r.pattern),
-                              preview: Digitizer.preview(r.pattern), fromPC: false, pattern: r.pattern)
+                              preview: Digitizer.preview(r.pattern, fixedHoop: s.fixedHoop), fromPC: false, pattern: r.pattern)
             }.value
         } catch {
             errorText = error.localizedDescription

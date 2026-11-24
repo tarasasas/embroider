@@ -28,6 +28,7 @@ enum LetteringStitchStyle: String, CaseIterable, Identifiable {
 struct Settings {
     var widthMM = 90.0
     var heightMM = 90.0
+    var fixedHoop = false
     var colors = 4
     var cleanup = 1              // 0-3
     var removeBackground = true

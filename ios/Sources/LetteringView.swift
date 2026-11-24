@@ -54,7 +54,8 @@ struct LetteringView: View {
     let pcConfigured: Bool
     @Binding var savedDraft: LetteringDraft
     let motifOnly: Bool
-    let onUse: (UIImage, LetteringStitchStyle, Int) -> Void
+    let placingElements: Bool
+    let onUse: (UIImage, LetteringStitchStyle, Int, LetteringDraft) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @AppStorage("letteringText") private var savedText = "Bears"
@@ -67,12 +68,14 @@ struct LetteringView: View {
     @FocusState private var editing: Bool
 
     init(hoopMM: (w: Double, h: Double), pcConfigured: Bool, draft: Binding<LetteringDraft>,
-         motifOnly: Bool = false, onUse: @escaping (UIImage, LetteringStitchStyle, Int) -> Void) {
+         motifOnly: Bool = false, placingElements: Bool = false,
+         onUse: @escaping (UIImage, LetteringStitchStyle, Int, LetteringDraft) -> Void) {
         self.hoopMM = hoopMM
         self.pcConfigured = pcConfigured
         self._savedDraft = draft
         self._draft = State(initialValue: draft.wrappedValue)
         self.motifOnly = motifOnly
+        self.placingElements = placingElements
         self.onUse = onUse
     }
 
@@ -107,17 +110,19 @@ struct LetteringView: View {
                             DisclosureGroup("Motif", isExpanded: $showMotif) { motifControls }
                         }
                     }
-                    Section {
-                        Picker("Stitch style", selection: $draft.stitch) {
-                            ForEach(LetteringStitchStyle.allCases) { style in
-                                Text(style.title).tag(style)
+                    if !placingElements {
+                        Section {
+                            Picker("Stitch style", selection: $draft.stitch) {
+                                ForEach(LetteringStitchStyle.allCases) { style in
+                                    Text(style.title).tag(style)
+                                }
                             }
-                        }
-                    } footer: {
-                        if draft.stitch.requiresPC && !pcConfigured {
-                            Text("Connect to the PC server to use this stitch style.")
-                        } else if draft.stitch == .auto && !pcConfigured {
-                            Text("The phone uses fill stitches. Auto uses satin and fill when connected to the PC.")
+                        } footer: {
+                            if draft.stitch.requiresPC && !pcConfigured {
+                                Text("Connect to the PC server to use this stitch style.")
+                            } else if draft.stitch == .auto && !pcConfigured {
+                                Text("The phone uses fill stitches. Auto uses satin and fill when connected to the PC.")
+                            }
                         }
                     }
                 }
@@ -127,18 +132,18 @@ struct LetteringView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
+                    Button(placingElements ? "Add" : "Done") {
                         guard let image else { return }
-                        if !motifOnly {
+                        if !motifOnly && !placingElements {
                             savedText = draft.text
                             savedFont = draft.fontName
                         }
                         savedDraft = draft
-                        onUse(image, draft.stitch, LetteringRenderer.colorCount(draft, motifOnly: motifOnly))
+                        onUse(image, draft.stitch, LetteringRenderer.colorCount(draft, motifOnly: motifOnly), draft)
                         dismiss()
                     }
                     .bold()
-                    .disabled(image == nil || (draft.stitch.requiresPC && !pcConfigured))
+                    .disabled(image == nil || (!placingElements && draft.stitch.requiresPC && !pcConfigured))
                 }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
@@ -211,7 +216,8 @@ struct LetteringView: View {
             if let image, !motifOnly, draft.shape == .straight, draft.letterFonts.isEmpty,
                !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let ink = image.size
-                let cap = Double(font.capHeight) * min((hoopMM.w - 10) / ink.width, (hoopMM.h - 10) / ink.height) / 25.4
+                let scale = min((hoopMM.w - 10) / ink.width, (hoopMM.h - 10) / ink.height)
+                let cap = Double(font.capHeight) * draft.heightScale * scale / 25.4
                 Label(String(format: "Capitals about %.2f in tall when the design fills the hoop", cap),
                       systemImage: cap < 0.25 ? "exclamationmark.triangle.fill" : "ruler")
                     .foregroundStyle(cap < 0.25 ? Color.orange : Color.secondary)
@@ -224,6 +230,7 @@ struct LetteringView: View {
 
     private var styleControls: some View {
         VStack(alignment: .leading, spacing: 12) {
+            slider("Height: \(Int((draft.heightScale * 100).rounded()))%", value: $draft.heightScale, in: 0.5...3)
             Picker("Shape", selection: $draft.shape) {
                 ForEach(LetteringShape.allCases) { Text($0.rawValue).tag($0) }
             }

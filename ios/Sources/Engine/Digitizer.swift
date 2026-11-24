@@ -93,8 +93,15 @@ enum Digitizer {
     }
 
     /// Draws the stitches as thread lines.
-    static func preview(_ pattern: EmbPattern, maxPx: CGFloat = 1000) -> UIImage {
-        let (minX, minY, maxX, maxY) = pattern.bounds
+    static func preview(_ pattern: EmbPattern, maxPx: CGFloat = 1000, fixedHoop: Bool = false) -> UIImage {
+        var (minX, minY, maxX, maxY) = pattern.bounds
+        if fixedHoop {
+            let half = Int(Hoop.fourByFour.sizeMM.w * UNITS_PER_MM / 2)
+            minX = min(minX, -half)
+            minY = min(minY, -half)
+            maxX = max(maxX, half)
+            maxY = max(maxY, half)
+        }
         let wMM = Double(maxX - minX) / UNITS_PER_MM, hMM = Double(maxY - minY) / UNITS_PER_MM
         let ppm = CGFloat(max(2.0, min(12.0, Double(maxPx) / max(wMM, hMM, 1))))
         let margin: CGFloat = 4
@@ -118,6 +125,15 @@ enum Digitizer {
                 let t = pattern.threads[min(i, pattern.threads.count - 1)]
                 g.setStrokeColor(UIColor(red: CGFloat(t.r) / 255, green: CGFloat(t.g) / 255,
                                          blue: CGFloat(t.b) / 255, alpha: 1).cgColor)
+            }
+            if fixedHoop {
+                let half = Int(Hoop.fourByFour.sizeMM.w * UNITS_PER_MM / 2)
+                let topLeft = screen(Stitch(x: -half, y: -half, cmd: .jump))
+                let field = CGFloat(2 * half) * k
+                g.setLineWidth(1)
+                g.setStrokeColor(UIColor.systemGray.cgColor)
+                g.stroke(CGRect(origin: topLeft, size: CGSize(width: field, height: field)))
+                g.setLineWidth(max(1, 0.55 * ppm))
             }
             var colorIndex = 0
             var pos: CGPoint? = nil

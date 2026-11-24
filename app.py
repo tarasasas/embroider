@@ -12,6 +12,7 @@ from PIL import Image, ImageTk
 
 import digitizer as dz
 import realistic
+from hoop_layout import HoopLayout
 from simulator import SewSimulator
 
 IMAGE_TYPES = [("Images and vector logos", "*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff *.svg"),
@@ -72,6 +73,10 @@ class App(tk.Tk):
         self.applique_all = tk.BooleanVar(value=False)  # set by the Applique lettering style
         self.editor_draft = {}
         self.previous_image_style = None
+        self.fixed_hoop = False
+        self.photo_hoop = None
+        self.layout_items = []
+        self.layout_style = "Auto (satin + fill)"
 
         d = dz.Settings()
         hoop = "4 x 4 in (100 x 100 mm)"
@@ -124,6 +129,7 @@ class App(tk.Tk):
                                                                                 padx=(4, 0))
         ttk.Button(buttons, text="Motifs...", command=lambda: self.open_text(motif_only=True)).pack(
             side="left", expand=True, fill="x", padx=(4, 0))
+        ttk.Button(side, text="4 × 4 Hoop Layout...", command=self.open_layout).pack(fill="x", pady=(4, 0))
         self.file_label = ttk.Label(side, text="No image loaded", foreground="#666", wraplength=300)
         self.file_label.pack(fill="x", pady=(4, 8))
 
@@ -132,11 +138,13 @@ class App(tk.Tk):
         hoop = ttk.Combobox(size, textvariable=self.hoop, values=list(dz.HOOPS), state="readonly", width=24)
         hoop.grid(row=0, column=1, sticky="e", pady=2)
         hoop.bind("<<ComboboxSelected>>", self._hoop_changed)
-        self._spin(size, 1, "Max width (in)", self.width_in, 0.4, 16, 0.1)
-        self._spin(size, 2, "Max height (in)", self.height_in, 0.4, 16, 0.1)
-        ttk.Checkbutton(size, text="Lock width x height (keep proportions)", variable=self.lock,
-                        command=lambda: self._size_edited("width")).grid(row=3, column=0, columnspan=2,
-                                                                          sticky="w", pady=2)
+        width = self._spin(size, 1, "Max width (in)", self.width_in, 0.4, 16, 0.1)
+        height = self._spin(size, 2, "Max height (in)", self.height_in, 0.4, 16, 0.1)
+        lock = ttk.Checkbutton(size, text="Lock width x height (keep proportions)", variable=self.lock,
+                               command=lambda: self._size_edited("width"))
+        lock.grid(row=3, column=0, columnspan=2, sticky="w", pady=2)
+        self.hoop_picker = hoop
+        self.size_controls = (width, height, lock)
 
         basics = self._group(side, "Basics")
         ttk.Label(basics, text="Fabric").grid(row=0, column=0, sticky="w", pady=2)
@@ -146,8 +154,8 @@ class App(tk.Tk):
         self.tip = ttk.Label(basics, text="", wraplength=290, foreground="#555", justify="left")
         self.tip.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 4))
         self._spin(basics, 2, "Thread colors (0 = auto)", self.colors, 0, 15, 1)
-        ttk.Checkbutton(basics, text="Remove background", variable=self.remove_bg).grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=2)
+        self.background_control = ttk.Checkbutton(basics, text="Remove background", variable=self.remove_bg)
+        self.background_control.grid(row=3, column=0, columnspan=2, sticky="w", pady=2)
         self._spin(basics, 6, "Bolder lines (mm, 0-1)", self.bold, 0, 1.0, 0.1)
         ttk.Label(basics, text="Shirt color (preview)").grid(row=4, column=0, sticky="w", pady=2)
         self.shirt_btn = tk.Button(basics, width=6, relief="solid", borderwidth=1, cursor="hand2",
@@ -225,8 +233,9 @@ class App(tk.Tk):
 
     def _spin(self, parent, row, label, var, lo, hi, step):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2)
-        ttk.Spinbox(parent, textvariable=var, from_=lo, to=hi, increment=step, width=8).grid(
-            row=row, column=1, sticky="e", pady=2)
+        spin = ttk.Spinbox(parent, textvariable=var, from_=lo, to=hi, increment=step, width=8)
+        spin.grid(row=row, column=1, sticky="e", pady=2)
+        return spin
 
     def _toggle_advanced(self):
         if self.show_advanced.get():
@@ -236,7 +245,7 @@ class App(tk.Tk):
 
     def _size_edited(self, changed):
         """With the lock on, changing one size box updates the other to keep the proportions."""
-        if self._syncing or not self.lock.get():
+        if self._syncing or self.fixed_hoop or not self.lock.get():
             return
         try:
             w, h = float(self.width_in.get()), float(self.height_in.get())
@@ -255,7 +264,9 @@ class App(tk.Tk):
         """Biggest design that fits the hoop with a margin (and keeps the proportions if locked)."""
         hw, hh = dz.HOOPS[self.hoop.get()]
         w, h = (hw - 10) / MM_PER_INCH, (hh - 10) / MM_PER_INCH  # leave a margin inside the hoop
-        if self.lock.get():
+        if self.fixed_hoop:
+            w = h = dz.LAYOUT_SIZE_MM / MM_PER_INCH
+        elif self.lock.get():
             w = min(w, h * self.aspect)
             h = w / self.aspect
         self._syncing = True
@@ -323,18 +334,27 @@ class App(tk.Tk):
             return
         self._set_source(img, path, f"{os.path.basename(path)}  ({img.width} x {img.height} px)")
 
-    def open_text(self, motif_only=False):
+    def open_layout(self):
+        def apply(image, items, style):
+            self.layout_items, self.layout_style = items, style
+            self._set_source(image, "4x4 layout", "4 × 4 hoop layout", style=style, fixed_hoop=True)
+
+        HoopLayout(self, self.layout_items, self.layout_style, STITCH_STYLES, self.open_text, apply)
+
+    def open_text(self, motif_only=False, layout_parent=None, on_layout=None):
         """Lettering: text, font (each name in its own font), shape, outlines/shadow, stitch style,
         with a live preview. The result becomes the design."""
         fonts = dz.list_fonts()
         if not fonts and not motif_only:
             messagebox.showerror("No fonts", "No TrueType fonts were found on this computer.")
             return
-        win = tk.Toplevel(self)
+        parent = layout_parent or self
+        win = tk.Toplevel(parent)
         win.title("Motifs" if motif_only else "Lettering")
-        win.transient(self)
+        win.transient(parent)
         win.grab_set()
-        draft = self.editor_draft.get(motif_only, {})
+        draft_key = ("layout", motif_only) if on_layout else motif_only
+        draft = self.editor_draft.get(draft_key, {})
         frame = ttk.Frame(win, padding=12)
         frame.pack(fill="both", expand=True)
         left, right = ttk.Frame(frame), ttk.Frame(frame)
@@ -346,7 +366,7 @@ class App(tk.Tk):
         entry = tk.Text(left, width=34, height=3, font=("Segoe UI", 11))
         entry.grid(row=1, column=0, columnspan=2, pady=(2, 8))
         if not motif_only:
-            entry.insert("1.0", draft.get("text", "Bears"))
+            entry.insert("1.0", draft.get("text", "" if on_layout else "Bears"))
             entry.focus_set()
         names = list(fonts)
         default = next((n for n in names if n.lower().startswith("graduate")), None) or \
@@ -370,6 +390,7 @@ class App(tk.Tk):
         opts.pack(fill="x")
         shape = tk.StringVar(value=draft.get("shape", "straight"))
         bend = tk.DoubleVar(value=draft.get("bend", 0.5))
+        height_scale = tk.DoubleVar(value=draft.get("height_scale", 1))
         align = tk.StringVar(value=draft.get("align", "center"))
         colors = {"text": (15, 30, 80), "outline": (230, 90, 20), "outline2": (255, 255, 255),
                   "shadow": (60, 60, 60), "motif": (230, 90, 20)} | draft.get("colors", {})
@@ -394,6 +415,10 @@ class App(tk.Tk):
                                         state="readonly", width=7)
             ttk.Label(opts, text="Alignment").grid(row=9, column=0, sticky="w")
             align_picker.grid(row=9, column=1, sticky="w")
+            ttk.Label(opts, text="Letter height").grid(row=10, column=0, sticky="w")
+            ttk.Scale(opts, from_=0.5, to=3, variable=height_scale, length=100).grid(row=10, column=1, sticky="w")
+            height_label = ttk.Label(opts)
+            height_label.grid(row=10, column=2, sticky="w")
 
         swatches = {}
 
@@ -421,9 +446,10 @@ class App(tk.Tk):
                 ttk.Scale(opts, from_=0.02, to=0.14, variable=width[key], length=90,
                           command=lambda v: refresh()).grid(row=i, column=2, sticky="w")
 
-        ttk.Label(opts, text="Stitch style").grid(row=6, column=0, sticky="w", pady=(8, 2))
-        ttk.Combobox(opts, textvariable=style, values=list(STITCH_STYLES), state="readonly", width=24).grid(
-            row=6, column=1, columnspan=2, sticky="w", pady=(8, 2))
+        if not on_layout:
+            ttk.Label(opts, text="Stitch style").grid(row=6, column=0, sticky="w", pady=(8, 2))
+            ttk.Combobox(opts, textvariable=style, values=list(STITCH_STYLES), state="readonly", width=24).grid(
+                row=6, column=1, columnspan=2, sticky="w", pady=(8, 2))
         ttk.Label(opts, text="Motif").grid(row=7, column=0, sticky="w")
         ttk.Combobox(opts, textvariable=motif, state="readonly", width=14,
                      values=motifs if motif_only else ["None", *motifs]).grid(row=7, column=1, sticky="w")
@@ -440,19 +466,25 @@ class App(tk.Tk):
         preview.pack(fill="both", expand=True, pady=(10, 0))
         state = {"job": None, "photo": None}
 
-        def make():
-            raw = entry.get("1.0", "end-1c")
-            text = raw.strip()
-            img = None
-            if text:
-                start = len(raw) - len(raw.lstrip())
-                img = dz.make_text_image(
-                    text, fonts[default_font], colors["text"], shape=shape.get(), bend=bend.get(), align=align.get(),
-                    letter_fonts={offset - start: fonts[name] for offset, name in letter_fonts.items()},
+        def render_text(text, font, overrides=None):
+            img = dz.make_text_image(
+                    text, fonts[font], colors["text"], shape=shape.get(), bend=bend.get(), align=align.get(),
+                    letter_fonts=overrides,
                     outline=(colors["outline"], width["outline"].get()) if use["outline"].get() else None,
                     outline2=(colors["outline2"], width["outline2"].get()) if use["outline2"].get() else None,
                     shadow=(colors["shadow"], width["shadow"].get(), width["shadow"].get())
                     if use["shadow"].get() else None)
+            if box := img.getbbox():
+                ink = img.crop(box)
+                return ink.resize((ink.width, max(1, round(ink.height * height_scale.get()))), Image.Resampling.LANCZOS)
+            return None
+
+        def make():
+            raw = entry.get("1.0", "end-1c")
+            text = raw.strip()
+            start = len(raw) - len(raw.lstrip())
+            overrides = {offset - start: fonts[name] for offset, name in letter_fonts.items()}
+            img = render_text(text, default_font, overrides) if text else None
             if motif.get() in motifs:
                 img = dz.compose_motif(img, motif.get(), colors["motif"], placement.get(), scale.get())
             box = img.getbbox() if img is not None else None
@@ -460,6 +492,8 @@ class App(tk.Tk):
 
         def draw_preview():
             state["job"] = None
+            if not motif_only:
+                height_label.config(text=f"{height_scale.get():.0%}")
             try:
                 img = make()
             except Exception as exc:
@@ -520,7 +554,7 @@ class App(tk.Tk):
             shape.trace_add("write", shape_changed)
             targets.bind("<<ComboboxSelected>>", show_target)
             update_targets(previous_text)
-        for var in (bend, align, motif, placement, scale):
+        for var in (bend, align, motif, placement, scale, height_scale):
             var.trace_add("write", refresh)
 
         def text_changed(_):
@@ -555,14 +589,28 @@ class App(tk.Tk):
                 return
             text = entry.get("1.0", "end-1c")
             name = (text.strip().splitlines()[0] if text.strip() else motif.get())[:30]
-            self.editor_draft[motif_only] = {
+            if on_layout:
+                parts = []
+                for offset, letter in dz.text_letters(text):
+                    if not letter.isspace():
+                        ink = render_text(letter, letter_fonts.get(offset, default_font))
+                        if ink:
+                            parts.append((letter, ink, ink.height * 26 / 300))
+                if motif.get() in motifs:
+                    art = dz.compose_motif(None, motif.get(), colors["motif"], "Right", 1)
+                    parts.append((motif.get(), art, 21))
+            self.editor_draft[draft_key] = {
                 "text": text, "font": default_font, "letter_fonts": letter_fonts,
                 "shape": shape.get(), "bend": bend.get(), "align": align.get(),
+                "height_scale": height_scale.get(),
                 "colors": colors, "use": {k: v.get() for k, v in use.items()},
                 "width": {k: v.get() for k, v in width.items()}, "style": style.get(),
                 "motif": motif.get(), "placement": placement.get(), "scale": scale.get(),
             }
             close()
+            if on_layout:
+                on_layout(parts)
+                return
             kind = "Motif" if motif_only else "Lettering"
             self._set_source(img, name, f"{kind}: {name}", style=style.get())
 
@@ -570,6 +618,8 @@ class App(tk.Tk):
             if state["job"]:
                 win.after_cancel(state["job"])
             win.destroy()
+            if layout_parent:
+                layout_parent.grab_set()
 
         use_design = ttk.Button(right, text="Use design", command=ok, state="disabled")
         use_design.pack(fill="x", pady=(10, 0))
@@ -658,7 +708,7 @@ class App(tk.Tk):
         box.keep = (tk_fonts, plain, query, category, fill, tag_of)
         return box
 
-    def _set_source(self, img, name, label, style=None):
+    def _set_source(self, img, name, label, style=None, fixed_hoop=False):
         if style is not None:
             if self.previous_image_style is None:
                 self.previous_image_style = {key: getattr(self, key).get() for key in STITCH_STYLES[style]}
@@ -670,6 +720,15 @@ class App(tk.Tk):
             for key, value in self.previous_image_style.items():
                 getattr(self, key).set(value)
             self.previous_image_style = None
+        if fixed_hoop and not self.fixed_hoop:
+            self.photo_hoop = self.hoop.get()
+            self.hoop.set(dz.LAYOUT_HOOP)
+        elif self.fixed_hoop and not fixed_hoop:
+            self.hoop.set(self.photo_hoop)
+        self.fixed_hoop = fixed_hoop
+        self.hoop_picker.config(state="disabled" if fixed_hoop else "readonly")
+        for control in (*self.size_controls, self.background_control):
+            control.config(state="disabled" if fixed_hoop else "normal")
         self.source, self.source_path, self.result = img, name, None
         self.color_edits = {}
         self.applique = set()
@@ -690,6 +749,7 @@ class App(tk.Tk):
         try:
             s = dz.Settings(
                 width_mm=float(self.width_in.get()) * MM_PER_INCH, height_mm=float(self.height_in.get()) * MM_PER_INCH,
+                fixed_hoop=self.fixed_hoop,
                 colors=int(self.colors.get()), remove_background=self.remove_bg.get(),
                 bold_mm=min(max(float(self.bold.get()), 0.0), 1.0),
                 brother_colors=self.brother.get(), cleanup=int(self.cleanup.get()),

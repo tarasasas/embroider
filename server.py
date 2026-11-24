@@ -85,6 +85,9 @@ def build_settings(request):
     s.bold_mm = _num(request, "bold_mm", 0.0, 0.0, 1.0)
     s.brother_colors = bool(request.get("brother_colors", True))
     s.applique_all = request.get("applique_all") is True
+    s.fixed_hoop = request.get("fixed_hoop") is True
+    if s.fixed_hoop:
+        s.remove_background = False
     for key, allowed in (("fill_type", dz.FILL_TYPES), ("edge", dz.LINE_TYPES), ("outline", dz.LINE_TYPES)):
         if request.get(key) in allowed:
             setattr(s, key, request[key])
@@ -95,7 +98,8 @@ def convert_request(request):
     """Runs the full conversion and returns the JSON-ready reply."""
     raw = base64.b64decode(request["image"])
     img = ImageOps.exif_transpose(Image.open(io.BytesIO(raw))).convert("RGBA")
-    result = dz.convert(img, build_settings(request))
+    settings = build_settings(request)
+    result = dz.convert(img, settings)
     pattern = result.pattern
 
     for index, hexcolor in (request.get("recolor") or {}).items():  # colors the user changed on the phone
@@ -111,7 +115,8 @@ def convert_request(request):
         with open(path, "rb") as f:
             pes = f.read()
     preview = io.BytesIO()
-    dz.render_preview(pattern, max_px=900).save(preview, "PNG")
+    hoop = dz.HOOPS[dz.LAYOUT_HOOP] if settings.fixed_hoop else None
+    dz.render_preview(pattern, max_px=900, hoop_mm=hoop).save(preview, "PNG")
 
     info = result.info
     threads = []
@@ -124,6 +129,7 @@ def convert_request(request):
         "width_mm": info["width_mm"], "height_mm": info["height_mm"],
         "stitches": info["stitches"], "minutes": info["minutes"], "threads": threads,
         "lettering_styles": True,
+        "fixed_hoop": settings.fixed_hoop,
     }
 
 

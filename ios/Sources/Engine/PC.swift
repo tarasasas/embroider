@@ -16,12 +16,14 @@ struct Design {
 enum PCError: LocalizedError {
     case unreachable
     case wrongCode
+    case needsLayoutServer
     case rejected(String)
 
     var errorDescription: String? {
         switch self {
         case .unreachable: return "Could not reach the PC. Is it on, on the same Wi-Fi, and is the phone server running?"
         case .wrongCode: return "The PC rejected the pairing code."
+        case .needsLayoutServer: return "Update and restart the PC server to preserve hoop placement."
         case .rejected(let message): return message
         }
     }
@@ -83,6 +85,7 @@ struct PCClient {
             body["edge"] = style.edge ?? edge
             body["applique_all"] = style == .applique
         }
+        if settings.fixedHoop { body["fixed_hoop"] = true }
         var request = URLRequest(url: try url("/convert"), timeoutInterval: 180)
         request.httpMethod = "POST"
         request.setValue(token.trimmingCharacters(in: .whitespaces), forHTTPHeaderField: "X-Token")
@@ -95,6 +98,9 @@ struct PCClient {
               let pes = (json["pes"] as? String).flatMap({ Data(base64Encoded: $0) }),
               let preview = (json["preview"] as? String).flatMap({ Data(base64Encoded: $0) }).flatMap({ UIImage(data: $0) })
         else { throw PCError.rejected("The PC sent back something unexpected.") }
+        if settings.fixedHoop, json["fixed_hoop"] as? Bool != true {
+            throw PCError.needsLayoutServer
+        }
         if settings.letteringStyle?.requiresPC == true, json["lettering_styles"] as? Bool != true {
             throw PCError.rejected("Update and restart the PC server to use this stitch style.")
         }

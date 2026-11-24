@@ -18,6 +18,7 @@ struct LetteringDraft {
     var alignment = 1
     var letterSpacing = 4.0
     var lineSpacing = 20.0
+    var heightScale = 1.0
     var threadColor = UIColor(red: 15.0 / 255, green: 30.0 / 255, blue: 80.0 / 255, alpha: 1)
     var shape = LetteringShape.straight
     var bend = 0.5
@@ -72,6 +73,10 @@ enum LetteringRenderer {
     }()
 
     static func colorCount(_ draft: LetteringDraft, motifOnly: Bool) -> Int {
+        colors(draft, motifOnly: motifOnly).count
+    }
+
+    static func colors(_ draft: LetteringDraft, motifOnly: Bool) -> Set<UIColor> {
         var colors = Set<UIColor>()
         if !motifOnly && !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             colors.insert(draft.threadColor)
@@ -80,7 +85,7 @@ enum LetteringRenderer {
             }
         }
         if motifs[draft.motif] != nil { colors.insert(draft.motifColor) }
-        return colors.count
+        return colors
     }
 
     static func render(_ draft: LetteringDraft, font: UIFont, motifOnly: Bool) -> UIImage? {
@@ -93,7 +98,16 @@ enum LetteringRenderer {
                 let face = draft.letterFonts[index].flatMap { UIFont(name: $0, size: font.pointSize) } ?? font
                 return Glyph(character: characters[index], font: face)
             }
-            letters = crop(renderText(glyphs, draft, font))
+            if let ink = crop(renderText(glyphs, draft, font)) {
+                if draft.heightScale == 1 {
+                    letters = ink
+                } else {
+                    let size = CGSize(width: ink.size.width, height: ink.size.height * draft.heightScale)
+                    letters = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+                        ink.draw(in: CGRect(origin: .zero, size: size))
+                    }
+                }
+            }
         }
         guard let points = motifs[draft.motif], let first = points.first else { return letters }
 
