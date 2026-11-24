@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))
 import digitizer as dz  # noqa: E402
 import pyembroidery  # noqa: E402
 from pyembroidery import JUMP, STITCH, STOP, TRIM  # noqa: E402
@@ -285,6 +286,28 @@ def test_whole_designs():
             sizes[ext] = len(back.stitches) if back else 0
         check("writes and reads back 5 machine formats", all(v > 100 for v in sizes.values()),
               " ".join(f"{k}:{v}" for k, v in sizes.items()))
+
+
+def test_coverage_no_gaps():
+    """No fabric may show inside the artwork: draw every stitch at thread width and look for holes."""
+    import coverage as cov
+    font = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "arialbd.ttf")
+    designs = {
+        "line art (strokes meeting fills)": shape(lambda d: (d.ellipse((40, 40, 560, 560), outline="black", width=60),
+                                                             d.rectangle((200, 200, 400, 400), fill="black"),
+                                                             d.line((300, 100, 300, 500), fill="black", width=30))),
+        "lettering": dz.make_text_image("Bears 23", font),
+    }
+    vector = os.path.join(os.path.dirname(__file__), "..", "source_images", "bear_head_black.png")
+    if os.path.exists(vector):
+        designs["bear logo"] = dz.load_image(vector)
+    for name, img in designs.items():
+        s = dz.Settings(width_mm=400, height_mm=63.5, colors=0)
+        for k, v in dz.FABRICS["T-shirt / knit"][0].items():
+            setattr(s, k, v)
+        art, pattern, center = cov.art_and_result(img, s)
+        share, _ = cov.coverage(art, pattern, center)
+        check(f"coverage: {name}", share < 0.006, f"{100 * share:.2f}% of the art without thread")
 
 
 if __name__ == "__main__":

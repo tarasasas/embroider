@@ -52,16 +52,16 @@ HOOPS = {
 
 # Fabric presets: settings to apply, and a stabilizer tip.
 FABRICS = {
-    "Woven cotton": ({"row_spacing_mm": 0.24, "satin_spacing_mm": 0.4, "pull_comp_mm": 0.15, "underlay": True},
+    "Woven cotton": ({"row_spacing_mm": 0.20, "satin_spacing_mm": 0.35, "pull_comp_mm": 0.15, "underlay": True},
                      "Medium tear-away stabilizer."),
-    "T-shirt / knit": ({"row_spacing_mm": 0.25, "satin_spacing_mm": 0.4, "pull_comp_mm": 0.25, "underlay": True},
+    "T-shirt / knit": ({"row_spacing_mm": 0.20, "satin_spacing_mm": 0.35, "pull_comp_mm": 0.25, "underlay": True},
                        "Cut-away stabilizer, so the knit can't stretch while it is sewn."),
-    "Denim / canvas": ({"row_spacing_mm": 0.24, "satin_spacing_mm": 0.4, "pull_comp_mm": 0.1, "underlay": True},
+    "Denim / canvas": ({"row_spacing_mm": 0.20, "satin_spacing_mm": 0.35, "pull_comp_mm": 0.1, "underlay": True},
                        "Tear-away stabilizer and a size 90/14 needle."),
-    "Towel / fleece": ({"row_spacing_mm": 0.22, "satin_spacing_mm": 0.35, "pull_comp_mm": 0.2, "underlay": True,
+    "Towel / fleece": ({"row_spacing_mm": 0.18, "satin_spacing_mm": 0.30, "pull_comp_mm": 0.2, "underlay": True,
                         "knockdown": True},
                        "Water-soluble topping on top so stitches don't sink into the pile."),
-    "Cap / thick": ({"row_spacing_mm": 0.25, "satin_spacing_mm": 0.4, "pull_comp_mm": 0.2, "underlay": True},
+    "Cap / thick": ({"row_spacing_mm": 0.20, "satin_spacing_mm": 0.35, "pull_comp_mm": 0.2, "underlay": True},
                     "Firm tear-away backing. Keep designs under about 55 mm tall."),
 }
 
@@ -86,8 +86,8 @@ class Settings:
 
     fill_type: str = "auto"  # "auto" = satin for narrow shapes, tatami for the rest
     satin_max_mm: float = 6.5  # "auto": shapes narrower than this become satin
-    satin_spacing_mm: float = 0.4
-    row_spacing_mm: float = 0.24  # tatami row spacing; smaller = denser (0.22-0.25 covers like Brother's own fills)
+    satin_spacing_mm: float = 0.35
+    row_spacing_mm: float = 0.20  # tatami row spacing; smaller = denser (sew-outs on knit needed 0.20)
     stitch_length_mm: float = 3.5
     fill_angle: float = 45.0
     auto_angle: bool = True  # long shapes are sewn along their length; others use fill_angle
@@ -988,8 +988,11 @@ def _split_at_corners(path, closed, leaf_a, leaf_b, radius, angle=60.0):
     return out
 
 
-def _satin_runs(poly, s, pen):
-    """Satin columns along the centre lines of a narrow polygon. Returns (runs, pen) or None."""
+def _satin_runs(poly, s, pen, center=None):
+    """Satin columns along the centre lines of a narrow polygon. Returns (runs, pen) or None.
+
+    Whatever part of the polygon the columns don't reach (where strokes meet or widen) is filled
+    with tatami first, underneath, so no fabric shows between the satin and its neighbours."""
     try:
         branches = _skeleton_branches(poly)
     except Exception:
@@ -1014,7 +1017,22 @@ def _satin_runs(poly, s, pen):
         if run:
             runs.append(run)
             pen = np.array(run[-1])
-    return (runs, pen) if runs else None
+    if not runs:
+        return None
+    if center is not None:
+        covered = unary_union([LineString(r).buffer(0.2) for r in runs if len(r) > 1])
+        leftover = poly.difference(covered).buffer(-0.1).buffer(0.1)  # ignore hairline slivers
+        parts = [q for q in _polygons_of(leftover) if q.area >= 0.25]
+        if parts:
+            patch_s = replace(s, underlay=False, min_area_mm2=0.2, auto_angle=True)
+            patch_runs, patch_pen = [], None
+            for q in parts:  # grown a little so the patch tucks under the satin around it
+                grown = q.buffer(0.4).intersection(poly.buffer(s.pull_comp_mm))
+                for g in _polygons_of(grown):
+                    new, patch_pen = _tatami(g, center, patch_s, patch_pen)
+                    patch_runs += new
+            runs = patch_runs + runs
+    return runs, pen
 
 
 def _satin_column(poly, path, closed, leaf_a, leaf_b, radius, step, s):
@@ -1344,8 +1362,11 @@ def digitize(labels, palette, s: Settings, groups=None):
         wide, narrow = _split_narrow(polys, satin_width, s.min_area_mm2)
         # grow wide areas by the pull compensation: stitching pulls the fabric in, and the growth
         # also overlaps neighbouring colors slightly so no fabric shows between them
-        wide = [w for w in _polygons_of(unary_union([w.buffer(s.pull_comp_mm) for w in wide]))
-                if w.area >= s.min_area_mm2]
+        # ... and 0.4 mm more where they meet this color's satin columns, so the two overlap
+        # instead of just touching (on stretchy fabric touching pieces pull apart and show a gap)
+        same_color = unary_union(polys).buffer(s.pull_comp_mm)
+        wide = [w for w in _polygons_of(unary_union([w.buffer(s.pull_comp_mm + 0.4) for w in wide])
+                                        .intersection(same_color)) if w.area >= s.min_area_mm2]
 
         runs = []
         todo = list(wide)
@@ -1364,7 +1385,7 @@ def digitize(labels, palette, s: Settings, groups=None):
             else:
                 k = min(range(len(todo)), key=lambda i: math.dist(pen, todo[i].representative_point().coords[0]))
             poly = todo.pop(k)
-            done = _satin_runs(poly, s, pen)
+            done = _satin_runs(poly, s, pen, center)
             if done is None:  # too odd a shape for a column: fill it instead
                 new, pen = _tatami(poly.buffer(s.pull_comp_mm), center, s, pen)
                 runs += new

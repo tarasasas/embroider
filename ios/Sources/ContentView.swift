@@ -14,9 +14,8 @@ enum Fabric: String, CaseIterable, Identifiable {
 
     var rowSpacingMM: Double {
         switch self {
-        case .woven, .denim: return 0.24
-        case .knit, .cap: return 0.25
-        case .towel: return 0.22
+        case .woven, .denim, .knit, .cap: return 0.20
+        case .towel: return 0.18
         }
     }
     var pullCompMM: Double {
