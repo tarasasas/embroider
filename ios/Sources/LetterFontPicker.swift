@@ -4,6 +4,7 @@ import UIKit
 /// Edits font choices locally until the user applies them to the design.
 struct LetterFontPicker: View {
     private static let defaultTarget = -1
+    static let allLetters = -2
 
     let draft: LetteringDraft
     let onApply: (String, [Int: String]) -> Void
@@ -26,15 +27,16 @@ struct LetterFontPicker: View {
         self._letterFonts = State(initialValue: draft.letterFonts.filter { available.contains($0.value) })
     }
 
-    private var editingDefault: Bool { selectedLetter == Self.defaultTarget }
+    private var editingDefault: Bool { selectedLetter < 0 }
     private var activeFont: String { letterFonts[selectedLetter] ?? baseFont }
     private var fontSelection: Binding<String> {
         let target = selectedLetter
         return Binding(
-            get: { target == Self.defaultTarget ? baseFont : letterFonts[target] ?? "" },
+            get: { target < 0 ? baseFont : letterFonts[target] ?? "" },
             set: { name in
-                if target == Self.defaultTarget {
+                if target < 0 {
                     baseFont = name
+                    if target == Self.allLetters { letterFonts.removeAll() }
                 } else {
                     letterFonts[target] = name.isEmpty ? nil : name
                 }
@@ -44,11 +46,14 @@ struct LetterFontPicker: View {
 
     var body: some View {
         let characters = Array(draft.text)
+        let sample = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let previewText = selectedLetter == Self.allLetters ? (sample.isEmpty ? "Aa" : sample)
+            : editingDefault ? "Aa" : String(characters[selectedLetter])
         NavigationStack {
             GeometryReader { geometry in
                 ScrollView {
                     VStack(spacing: 16) {
-                        preview(character: editingDefault ? "Aa" : String(characters[selectedLetter]),
+                        preview(character: previewText,
                                 height: min(340, max(164, geometry.size.height * 0.44)))
                         controls(characters: characters)
                     }
@@ -64,8 +69,8 @@ struct LetterFontPicker: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Apply") {
-                        onApply(baseFont, letterFonts)
+                    Button(selectedLetter == Self.allLetters ? "Apply to all" : "Apply") {
+                        onApply(baseFont, selectedLetter == Self.allLetters ? [:] : letterFonts)
                         dismiss()
                     }
                     .bold()
@@ -148,6 +153,7 @@ struct LetterFontPicker: View {
                     VStack(spacing: 0) {
                         Text("Letter").font(.caption).foregroundStyle(.secondary)
                         Picker("Letter", selection: $selectedLetter) {
+                            Text("All letters").tag(Self.allLetters)
                             Text("Default").tag(Self.defaultTarget)
                             ForEach(characters.indices.filter { !characters[$0].isWhitespace }, id: \.self) { index in
                                 Text(String(characters[index]))

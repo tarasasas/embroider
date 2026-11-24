@@ -179,6 +179,7 @@ struct LetteringView: View {
             Text("Letter fonts").font(.subheadline)
             ScrollView(.horizontal) {
                 HStack(spacing: 6) {
+                    targetButton("All letters", index: LetterFontPicker.allLetters)
                     targetButton("Default font", index: nil)
                     ForEach(characters.indices.filter { !characters[$0].isWhitespace }, id: \.self) { index in
                         targetButton(String(characters[index]), index: index)
@@ -189,20 +190,21 @@ struct LetteringView: View {
     }
 
     private func targetButton(_ label: String, index: Int?) -> some View {
+        let isCharacter = index.map { $0 >= 0 } ?? false
         let face = index.flatMap { draft.letterFonts[$0] } ?? draft.fontName
         return Button {
             editing = false
             fontPicker = FontPickerRequest(letter: index)
         } label: {
             Text(label)
-                .font(index == nil ? .body : .custom(face, size: 20))
+                .font(isCharacter ? .custom(face, size: 20) : .body)
                 .padding(.horizontal, 10)
                 .frame(minWidth: 40, minHeight: 44)
                 .background(Color.accentColor.opacity(draft.letterFonts[index ?? -1] == nil ? 0.08 : 0.18),
                             in: RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(index.map { "Character \($0 + 1), \(label)" } ?? "Default font")
+        .accessibilityLabel(isCharacter ? "Character \((index ?? 0) + 1), \(label)" : label)
     }
 
     private func preview(_ image: UIImage?, font: UIFont) -> some View {

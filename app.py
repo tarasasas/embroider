@@ -379,7 +379,7 @@ class App(tk.Tk):
         letter_fonts = dict(draft.get("letter_fonts", {}))
         previous_text = entry.get("1.0", "end-1c")
         target_offsets = {}
-        target = tk.StringVar(value="Default font")
+        target = tk.StringVar(value="All letters")
         if not motif_only:
             targets = ttk.Combobox(left, textvariable=target, state="readonly", width=14)
             ttk.Label(left, text="Apply font to").grid(row=2, column=0, columnspan=2, sticky="w")
@@ -530,7 +530,10 @@ class App(tk.Tk):
         def choose_font(name):
             nonlocal default_font
             offset = target_offsets.get(target.get())
-            if offset is None:
+            if target.get() == "All letters":
+                default_font = name
+                letter_fonts.clear()
+            elif offset is None:
                 default_font = name
             elif name == default_font:
                 letter_fonts.pop(offset, None)
@@ -552,7 +555,7 @@ class App(tk.Tk):
             target_offsets.update((f"{index + 1}: {letter}", offset)
                                   for index, (offset, letter) in enumerate(dz.text_letters(text))
                                   if not letter.isspace())
-            targets.config(values=("Default font", *target_offsets))
+            targets.config(values=("All letters", "Default font", *target_offsets))
             targets.current(0)
             show_target()
 
@@ -602,10 +605,10 @@ class App(tk.Tk):
                     if not letter.isspace():
                         ink = render_text(letter, letter_fonts.get(offset, default_font))
                         if ink:
-                            parts.append((letter, ink, ink.height * 26 / 300))
+                            parts.append((letter, ink, ink.height * 26 / 300, True))
                 if motif.get() in motifs:
                     art = dz.compose_motif(None, motif.get(), colors["motif"], "Right", 1)
-                    parts.append((motif.get(), art, 21))
+                    parts.append((motif.get(), art, 21, False))
             self.editor_draft[draft_key] = {
                 "text": text, "font": default_font, "letter_fonts": letter_fonts,
                 "shape": shape.get(), "bend": bend.get(), "align": align.get(),

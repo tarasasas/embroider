@@ -1,11 +1,12 @@
 import SwiftUI
 import UIKit
 
-struct HoopLayoutItem: Identifiable {
+struct HoopLayoutItem: Identifiable, Equatable {
     let id = UUID()
     let title: String
     let image: UIImage
     let colors: Set<UIColor>
+    let isLetter: Bool
     var center: CGPoint
     var size: CGSize
 }
@@ -15,13 +16,23 @@ struct HoopLayoutView: View {
     private static let margin: CGFloat = 4
     private static let maximumSize = field - 2 * margin
 
+    private struct LayoutState {
+        let items: [HoopLayoutItem]
+        let selected: UUID?
+        let lettersSelected: Bool
+        let style: LetteringStitchStyle
+    }
+
     let pcConfigured: Bool
     let onUse: (UIImage, LetteringStitchStyle, Int, [HoopLayoutItem]) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var items: [HoopLayoutItem]
     @State private var selected: UUID?
-    @State private var dragStart: CGPoint?
+    @State private var lettersSelected = false
+    @State private var undoHistory: [LayoutState] = []
+    @State private var moveStart: LayoutState?
+    @State private var resizeStart: LayoutState?
     @State private var lettering = LetteringDraft(text: "")
     @State private var motif = LetteringDraft(motif: "Star")
     @State private var showLettering = false
@@ -46,6 +57,11 @@ struct HoopLayoutView: View {
                         Button { showMotif = true } label: { Label("Add motif", systemImage: "star") }
                     }
                     .buttonStyle(.bordered)
+                    Button("Select all letters") {
+                        lettersSelected = true
+                        selected = nil
+                    }
+                    .disabled(!items.contains(where: \.isLetter))
 
                     GeometryReader { geometry in
                         let side = geometry.size.width
@@ -53,14 +69,18 @@ struct HoopLayoutView: View {
                     }
                     .aspectRatio(1, contentMode: .fit)
 
-                    if let index = items.firstIndex(where: { $0.id == selected }) {
-                        itemControls(item: items[index])
+                    if !selectedItems(in: layoutState).isEmpty {
+                        itemControls
                     } else {
                         Text(items.isEmpty ? "Add text or a motif to start." : "Tap or drag an item to select it.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
-                    Picker("Stitch style", selection: $style) {
+                    Picker("Stitch style", selection: Binding(get: { style }, set: { newStyle in
+                        let before = layoutState
+                        style = newStyle
+                        recordUndo(from: before)
+                    })) {
                         ForEach(LetteringStitchStyle.allCases) { Text($0.title).tag($0) }
                     }
                     if style.requiresPC && !pcConfigured {
@@ -76,6 +96,11 @@ struct HoopLayoutView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .primaryAction) {
+                    Button(action: undo) { Label("Undo", systemImage: "arrow.uturn.backward") }
+                        .keyboardShortcut("z", modifiers: .command)
+                        .disabled(undoHistory.isEmpty)
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { useLayout() }
                         .bold()
@@ -91,7 +116,9 @@ struct HoopLayoutView: View {
             .sheet(isPresented: $showMotif) {
                 LetteringView(hoopMM: Hoop.fourByFour.sizeMM, pcConfigured: pcConfigured,
                               draft: $motif, motifOnly: true, placingElements: true) { image, _, _, draft in
+                    let before = layoutState
                     insert(image: image, title: draft.motif, colors: [draft.motifColor], height: 21)
+                    recordUndo(from: before)
                 }
             }
         }
@@ -101,7 +128,7 @@ struct HoopLayoutView: View {
         let scale = side / Self.field
         return ZStack(alignment: .topLeading) {
             Rectangle().fill(Color(red: 0.92, green: 0.94, blue: 0.96))
-                .onTapGesture { selected = nil }
+                .onTapGesture { select(nil) }
             Path { path in
                 for division in 1...3 {
                     let mark = side * CGFloat(division) / 4
@@ -121,27 +148,36 @@ struct HoopLayoutView: View {
                 Image(uiImage: item.image)
                     .resizable()
                     .frame(width: item.size.width * scale, height: item.size.height * scale)
-                    .overlay(Rectangle().strokeBorder(Color.blue, lineWidth: selected == item.id ? 2 : 0))
                     .padding(5)
                     .contentShape(Rectangle())
                     .position(x: item.center.x * scale, y: item.center.y * scale)
                     .highPriorityGesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("hoopLayoutCanvas"))
                         .onChanged { value in
                             guard let index = items.firstIndex(where: { $0.id == item.id }), scale > 0 else { return }
-                            if dragStart == nil {
-                                selected = item.id
-                                dragStart = items[index].center
+                            if moveStart == nil {
+                                if !lettersSelected || !items[index].isLetter { select(item.id) }
+                                moveStart = layoutState
                             }
-                            if let origin = dragStart {
-                                let point = CGPoint(x: origin.x + value.translation.width / scale,
-                                                    y: origin.y + value.translation.height / scale)
-                                items[index].center = clamped(point, size: items[index].size)
+                            if let before = moveStart {
+                                moveSelection(from: before, dx: value.translation.width / scale,
+                                              dy: value.translation.height / scale)
                             }
                         }
-                        .onEnded { _ in dragStart = nil })
+                        .onEnded { _ in
+                            if let before = moveStart { recordUndo(from: before) }
+                            moveStart = nil
+                        })
                     .accessibilityLabel(item.title)
                     .accessibilityAddTraits(.isButton)
-                    .accessibilityAction { selected = item.id }
+                    .accessibilityAction { select(item.id) }
+            }
+            let selection = selectedItems(in: layoutState)
+            if !selection.isEmpty {
+                let box = bounds(of: selection)
+                Rectangle().strokeBorder(Color.blue, lineWidth: 2)
+                    .frame(width: box.width * scale, height: box.height * scale)
+                    .position(x: box.midX * scale, y: box.midY * scale)
+                    .allowsHitTesting(false)
             }
         }
         .frame(width: side, height: side)
@@ -150,50 +186,73 @@ struct HoopLayoutView: View {
         .overlay(Rectangle().strokeBorder(Color.blue.opacity(0.35)).allowsHitTesting(false))
     }
 
-    private func itemControls(item: HoopLayoutItem) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+    private var itemControls: some View {
+        let item = items.first { $0.id == selected }
+        return VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(item.title).font(.headline)
+                Text(lettersSelected ? "All letters" : item?.title ?? "").font(.headline)
                 Spacer()
-                Button {
-                    insert(image: item.image, title: item.title, colors: item.colors, size: item.size)
-                } label: {
-                    Image(systemName: "plus.square.on.square").accessibilityLabel("Duplicate item")
+                if let item {
+                    Button {
+                        let before = layoutState
+                        insert(image: item.image, title: item.title, colors: item.colors, size: item.size,
+                               isLetter: item.isLetter)
+                        recordUndo(from: before)
+                    } label: {
+                        Image(systemName: "plus.square.on.square").accessibilityLabel("Duplicate item")
+                    }
+                    .buttonStyle(.bordered)
+                    Button(role: .destructive) {
+                        let before = layoutState
+                        items.removeAll { $0.id == item.id }
+                        select(nil)
+                        recordUndo(from: before)
+                    } label: {
+                        Image(systemName: "trash").accessibilityLabel("Remove item")
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.bordered)
-                Button(role: .destructive) {
-                    items.removeAll { $0.id == item.id }
-                    selected = nil
-                } label: {
-                    Image(systemName: "trash").accessibilityLabel("Remove item")
-                }
-                .buttonStyle(.bordered)
             }
-            dimension("Width", item: item, keyPath: \.width)
-            dimension("Height", item: item, keyPath: \.height)
+            dimension("Width", sizeKey: \.width, centerKey: \.x)
+            dimension("Height", sizeKey: \.height, centerKey: \.y)
         }
         .padding(12)
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
     }
 
-    private func dimension(_ title: String, item: HoopLayoutItem, keyPath: WritableKeyPath<CGSize, CGFloat>) -> some View {
+    private func dimension(_ title: String, sizeKey: WritableKeyPath<CGSize, CGFloat>,
+                           centerKey: WritableKeyPath<CGPoint, CGFloat>) -> some View {
+        let current = selectedItems(in: layoutState)
+        let extent = bounds(of: current).size[keyPath: sizeKey]
+        let smallest = current.map { $0.size[keyPath: sizeKey] }.min() ?? 2
+        let minimum = min(Self.maximumSize, max(2, 2 * extent / smallest))
         let value = Binding<Double>(
-            get: { Double(items.first { $0.id == item.id }?.size[keyPath: keyPath] ?? item.size[keyPath: keyPath]) },
+            get: { Double(bounds(of: selectedItems(in: layoutState)).size[keyPath: sizeKey]) },
             set: { value in
-                guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
-                items[index].size[keyPath: keyPath] = CGFloat(value)
-                items[index].center = clamped(items[index].center, size: items[index].size)
+                let before = resizeStart == nil ? layoutState : nil
+                resizeSelection(to: CGFloat(value), sizeKey: sizeKey, centerKey: centerKey)
+                if let before { recordUndo(from: before) }
             }
         )
         return HStack {
             Text(title).frame(width: 48, alignment: .leading)
-            Slider(value: value, in: 2...Double(Self.maximumSize)) { Text(title) }
+            Slider(value: value, in: Double(min(minimum, Self.maximumSize - 0.001))...Double(Self.maximumSize),
+                   onEditingChanged: { editing in
+                if editing {
+                    resizeStart = layoutState
+                } else if let before = resizeStart {
+                    resizeStart = nil
+                    recordUndo(from: before)
+                }
+            }) { Text(title) }
+            .disabled(minimum >= Self.maximumSize)
             Text(String(format: "%.2f in", value.wrappedValue / 25.4)).monospacedDigit()
         }
         .font(.footnote)
     }
 
     private func addLettering(_ draft: LetteringDraft) {
+        let before = layoutState
         _ = LetteringFont.all
         var glyph = draft
         glyph.motif = ""
@@ -206,23 +265,84 @@ struct HoopLayoutView: View {
             if let image = LetteringRenderer.render(glyph, font: font, motifOnly: false) {
                 let height = image.size.height * 26 / LetteringRenderer.pointSize
                 insert(image: image, title: glyph.text, colors: LetteringRenderer.colors(glyph, motifOnly: false),
-                       height: height)
+                       height: height, isLetter: true)
             }
+        }
+        recordUndo(from: before)
+    }
+
+    private var layoutState: LayoutState {
+        LayoutState(items: items, selected: selected, lettersSelected: lettersSelected, style: style)
+    }
+
+    private func recordUndo(from before: LayoutState) {
+        if items != before.items || style != before.style { undoHistory.append(before) }
+    }
+
+    private func undo() {
+        guard let before = undoHistory.popLast() else { return }
+        moveStart = nil
+        resizeStart = nil
+        items = before.items
+        selected = before.selected
+        lettersSelected = before.lettersSelected
+        style = before.style
+    }
+
+    private func select(_ item: UUID?) {
+        lettersSelected = false
+        selected = item
+    }
+
+    private func selectedItems(in state: LayoutState) -> [HoopLayoutItem] {
+        state.items.filter { state.lettersSelected ? $0.isLetter : $0.id == state.selected }
+    }
+
+    private func bounds(of selection: [HoopLayoutItem]) -> CGRect {
+        selection.reduce(CGRect.null) { $0.union(rect(center: $1.center, size: $1.size)) }
+    }
+
+    private func moveSelection(from before: LayoutState, dx: CGFloat, dy: CGFloat) {
+        let originals = selectedItems(in: before)
+        let box = bounds(of: originals)
+        let x = dx == 0 ? 0 : min(max(dx, Self.margin - box.minX), Self.field - Self.margin - box.maxX)
+        let y = dy == 0 ? 0 : min(max(dy, Self.margin - box.minY), Self.field - Self.margin - box.maxY)
+        for original in originals {
+            guard let index = items.firstIndex(where: { $0.id == original.id }) else { continue }
+            items[index].center = CGPoint(x: original.center.x + x, y: original.center.y + y)
         }
     }
 
-    private func insert(image: UIImage, title: String, colors: Set<UIColor>, height: CGFloat) {
+    private func resizeSelection(to size: CGFloat, sizeKey: WritableKeyPath<CGSize, CGFloat>,
+                                 centerKey: WritableKeyPath<CGPoint, CGFloat>) {
+        let originals = selectedItems(in: layoutState)
+        guard !originals.isEmpty else { return }
+        let box = bounds(of: originals)
+        let extent = box.size[keyPath: sizeKey]
+        guard abs(size - extent) > 0.000_001 else { return }
+        let center = CGPoint(x: box.midX, y: box.midY)[keyPath: centerKey]
+        let newCenter = min(max(center, Self.margin + size / 2), Self.field - Self.margin - size / 2)
+        let factor = size / extent
+        for original in originals {
+            guard let index = items.firstIndex(where: { $0.id == original.id }) else { continue }
+            items[index].center[keyPath: centerKey] = newCenter + (original.center[keyPath: centerKey] - center) * factor
+            items[index].size[keyPath: sizeKey] = original.size[keyPath: sizeKey] * factor
+        }
+    }
+
+    private func insert(image: UIImage, title: String, colors: Set<UIColor>, height: CGFloat, isLetter: Bool = false) {
         let width = height * image.size.width / image.size.height
         let scale = min(1, Self.maximumSize / max(width, height))
         insert(image: image, title: title, colors: colors,
-               size: CGSize(width: max(2, width * scale), height: max(2, height * scale)))
+               size: CGSize(width: max(2, width * scale), height: max(2, height * scale)), isLetter: isLetter)
     }
 
-    private func insert(image: UIImage, title: String, colors: Set<UIColor>, size: CGSize) {
+    private func insert(image: UIImage, title: String, colors: Set<UIColor>, size: CGSize, isLetter: Bool) {
         let center = nextPosition(size: size)
-        let item = HoopLayoutItem(title: title, image: image, colors: colors, center: center, size: size)
+        let item = HoopLayoutItem(title: title, image: image, colors: colors, isLetter: isLetter,
+                                  center: center, size: size)
         items.append(item)
-        selected = item.id
+        select(item.id)
     }
 
     private func nextPosition(size: CGSize) -> CGPoint {
