@@ -231,7 +231,7 @@ enum LetteringRenderer {
                 block.draw(at: .zero)
             }
         case .wave:
-            let amplitude = pointSize * (0.08 + 0.3 * draft.bend)
+            let amplitude = pointSize * (0.08 + 0.3 * CGFloat(draft.bend))
             let wavelength = max(size.width / 1.5, pointSize * 3)
             let height = size.height + 2 * amplitude
             return UIGraphicsImageRenderer(size: CGSize(width: size.width, height: height), format: format).image { renderer in
@@ -240,7 +240,8 @@ enum LetteringRenderer {
                 while x < size.width {
                     context.saveGState()
                     context.clip(to: CGRect(x: x, y: 0, width: 4, height: height))
-                    let y = amplitude * (1 + sin(2 * .pi * (x + 2) / wavelength))
+                    let phase = 2 * CGFloat.pi * (x + 2) / wavelength
+                    let y = amplitude * (1 + sin(phase))
                     block.draw(at: CGPoint(x: 0, y: y))
                     context.restoreGState()
                     x += 4
@@ -254,14 +255,15 @@ enum LetteringRenderer {
     private static func crop(_ image: UIImage) -> UIImage? {
         guard let cg = image.cgImage else { return nil }
         let w = cg.width, h = cg.height
+        let rgba = CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
         guard let mask = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                                   space: nil, bitmapInfo: CGImageAlphaInfo.alphaOnly.rawValue),
+                                   space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: rgba),
               let bytes = mask.data?.assumingMemoryBound(to: UInt8.self) else { return image }
         mask.draw(cg, in: CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h)))
         var left = w, right = -1, top = h, bottom = -1
         for y in 0..<h {
             let row = bytes + y * mask.bytesPerRow
-            for x in 0..<w where row[x] > 32 {
+            for x in 0..<w where row[x * 4 + 3] > 32 {
                 left = min(left, x)
                 right = max(right, x)
                 top = min(top, y)
