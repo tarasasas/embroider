@@ -75,6 +75,7 @@ struct ContentView: View {
     @State private var outline = "none"
     @State private var showAdvanced = false
     @State private var showPC = false
+    @State private var showLettering = false
     @State private var lockRatio = true   // keep width x height in the image's proportions
     @State private var aspect = 1.0       // image width / height
 
@@ -103,6 +104,11 @@ struct ContentView: View {
                 Section {
                     PhotosPicker(selection: $pickerItem, matching: .images) {
                         Label(image == nil ? "Choose image" : "Choose a different image", systemImage: "photo")
+                    }
+                    Button {
+                        showLettering = true
+                    } label: {
+                        Label("Add lettering", systemImage: "textformat")
                     }
                 }
 
@@ -232,15 +238,14 @@ struct ContentView: View {
             }
             .navigationTitle("Embroidery")
         }
+        .sheet(isPresented: $showLettering) {
+            LetteringView(hoopMM: hoop.sizeMM) { img in useImage(img) }
+        }
         .onChange(of: pickerItem) { item in
             guard let item else { return }
             Task {
                 if let data = try? await item.loadTransferable(type: Data.self), let img = UIImage(data: data) {
-                    image = img
-                    aspect = img.size.width / max(1, img.size.height)
-                    applyAutomatic()
-                    fitToHoop()
-                    generate()
+                    useImage(img)
                 } else {
                     errorText = "Could not load that photo."
                 }
@@ -313,6 +318,15 @@ struct ContentView: View {
         settings.cleanup = 1
         settings.brotherColors = true
         settings.trimMM = 1
+    }
+
+    /// Starts a new design from a picture (a photo, or lettering drawn on the lettering page).
+    private func useImage(_ img: UIImage) {
+        image = img
+        aspect = img.size.width / max(1, img.size.height)
+        applyAutomatic()
+        fitToHoop()
+        generate()
     }
 
     // MARK: - Size
