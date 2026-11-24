@@ -76,6 +76,8 @@ struct ContentView: View {
     @State private var outline = "none"
     @State private var showAdvanced = false
     @State private var showPC = false
+    @State private var lockRatio = true   // keep width x height in the image's proportions
+    @State private var aspect = 1.0       // image width / height
 
     @State private var design: Design?
     @State private var fileURL: URL?
@@ -149,8 +151,9 @@ struct ContentView: View {
                     Picker("Hoop", selection: $hoop) {
                         ForEach(Hoop.allCases) { Text($0.rawValue).tag($0) }
                     }
-                    inchSlider("Width", $settings.widthMM, maxMM: hoop.sizeMM.w)
-                    inchSlider("Height", $settings.heightMM, maxMM: hoop.sizeMM.h)
+                    Toggle("Lock width x height", isOn: $lockRatio)
+                    inchSlider("Width", Binding(get: { settings.widthMM }, set: { setWidth($0) }), maxMM: hoop.sizeMM.w)
+                    inchSlider("Height", Binding(get: { settings.heightMM }, set: { setHeight($0) }), maxMM: hoop.sizeMM.h)
                 } header: {
                     Text("Size")
                 } footer: {
@@ -233,19 +236,18 @@ struct ContentView: View {
             Task {
                 if let data = try? await item.loadTransferable(type: Data.self), let img = UIImage(data: data) {
                     image = img
+                    aspect = img.size.width / max(1, img.size.height)
                     applyAutomatic()
+                    fitToHoop()
                     generate()
                 } else {
                     errorText = "Could not load that photo."
                 }
             }
         }
-        .onChange(of: hoop) { newHoop in
-            // keep the design a little smaller than the hoop
-            settings.widthMM = min(settings.widthMM, newHoop.sizeMM.w - 10)
-            settings.heightMM = min(settings.heightMM, newHoop.sizeMM.h - 10)
-            if settings.widthMM < 10 { settings.widthMM = newHoop.sizeMM.w - 10 }
-            if settings.heightMM < 10 { settings.heightMM = newHoop.sizeMM.h - 10 }
+        .onChange(of: hoop) { _ in fitToHoop() }
+        .onChange(of: lockRatio) { locked in
+            if locked { setWidth(settings.widthMM) }
         }
         .onChange(of: fabric) { _ in applyAutomatic() }
     }
@@ -310,6 +312,43 @@ struct ContentView: View {
         settings.cleanup = 1
         settings.brotherColors = true
         settings.trimMM = 3
+    }
+
+    // MARK: - Size
+
+    /// Sets the width; with the lock on, the height follows (and the pair stays inside the hoop).
+    private func setWidth(_ mm: Double) {
+        settings.widthMM = mm
+        guard lockRatio else { return }
+        var h = mm / aspect
+        if h > hoop.sizeMM.h {
+            h = hoop.sizeMM.h
+            settings.widthMM = h * aspect
+        }
+        settings.heightMM = h
+    }
+
+    private func setHeight(_ mm: Double) {
+        settings.heightMM = mm
+        guard lockRatio else { return }
+        var w = mm * aspect
+        if w > hoop.sizeMM.w {
+            w = hoop.sizeMM.w
+            settings.heightMM = w / aspect
+        }
+        settings.widthMM = w
+    }
+
+    /// Biggest design that fits the hoop with a margin (keeps the proportions if locked).
+    private func fitToHoop() {
+        var w = hoop.sizeMM.w - 10
+        var h = hoop.sizeMM.h - 10
+        if lockRatio {
+            w = min(w, h * aspect)
+            h = w / aspect
+        }
+        settings.widthMM = w
+        settings.heightMM = h
     }
 
     // MARK: - Controls

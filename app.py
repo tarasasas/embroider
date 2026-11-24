@@ -46,6 +46,11 @@ class App(tk.Tk):
         self.hoop = tk.StringVar(value=hoop)
         self.width_in = tk.DoubleVar(value=round((dz.HOOPS[hoop][0] - 10) / MM_PER_INCH, 2))
         self.height_in = tk.DoubleVar(value=round((dz.HOOPS[hoop][1] - 10) / MM_PER_INCH, 2))
+        self.lock = tk.BooleanVar(value=True)  # keep width x height in the image's proportions
+        self.aspect = 1.0
+        self._syncing = False
+        self.width_in.trace_add("write", lambda *_: self._size_edited("width"))
+        self.height_in.trace_add("write", lambda *_: self._size_edited("height"))
         self.fabric = tk.StringVar(value=DEFAULT_FABRIC)
         self.colors = tk.IntVar(value=d.colors)
         self.cleanup = tk.IntVar(value=d.cleanup)
@@ -90,6 +95,9 @@ class App(tk.Tk):
         hoop.bind("<<ComboboxSelected>>", self._hoop_changed)
         self._spin(size, 1, "Max width (in)", self.width_in, 0.4, 16, 0.1)
         self._spin(size, 2, "Max height (in)", self.height_in, 0.4, 16, 0.1)
+        ttk.Checkbutton(size, text="Lock width x height (keep proportions)", variable=self.lock,
+                        command=lambda: self._size_edited("width")).grid(row=3, column=0, columnspan=2,
+                                                                          sticky="w", pady=2)
 
         basics = self._group(side, "Basics")
         ttk.Label(basics, text="Fabric").grid(row=0, column=0, sticky="w", pady=2)
@@ -175,10 +183,39 @@ class App(tk.Tk):
         else:
             self.advanced.pack_forget()
 
+    def _size_edited(self, changed):
+        """With the lock on, changing one size box updates the other to keep the proportions."""
+        if self._syncing or not self.lock.get():
+            return
+        try:
+            w, h = float(self.width_in.get()), float(self.height_in.get())
+        except (tk.TclError, ValueError):
+            return  # half-typed number
+        self._syncing = True
+        try:
+            if changed == "width":
+                self.height_in.set(round(w / self.aspect, 2))
+            else:
+                self.width_in.set(round(h * self.aspect, 2))
+        finally:
+            self._syncing = False
+
+    def _fit_to_hoop(self):
+        """Biggest design that fits the hoop with a margin (and keeps the proportions if locked)."""
+        hw, hh = dz.HOOPS[self.hoop.get()]
+        w, h = (hw - 10) / MM_PER_INCH, (hh - 10) / MM_PER_INCH  # leave a margin inside the hoop
+        if self.lock.get():
+            w = min(w, h * self.aspect)
+            h = w / self.aspect
+        self._syncing = True
+        try:
+            self.width_in.set(round(w, 2))
+            self.height_in.set(round(h, 2))
+        finally:
+            self._syncing = False
+
     def _hoop_changed(self, _event=None):
-        w, h = dz.HOOPS[self.hoop.get()]
-        self.width_in.set(round((w - 10) / MM_PER_INCH, 2))  # leave a margin inside the hoop
-        self.height_in.set(round((h - 10) / MM_PER_INCH, 2))
+        self._fit_to_hoop()
 
     def _apply_fabric(self):
         """Sets every stitch setting from the fabric: sensible defaults for beginners."""
@@ -284,6 +321,8 @@ class App(tk.Tk):
 
     def _set_source(self, img, name, label):
         self.source, self.source_path, self.result = img, name, None
+        self.aspect = img.width / max(1, img.height)
+        self._fit_to_hoop()
         shown = Image.new("RGBA", img.size, (244, 244, 244, 255))
         shown.alpha_composite(img)
         self.images = {"original": shown.convert("RGB"), "colors": None, "stitches": None}
