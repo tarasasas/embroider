@@ -5,3 +5,5 @@ ios/*.ipa
 ios/*.xcodeproj/
 ios/Info.plist
 dist/
+test_sews/
+source_images/
