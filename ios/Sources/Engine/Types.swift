@@ -71,6 +71,12 @@ struct EmbError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
 @inline(__always) func distSq(_ a: Pt, _ b: Pt) -> Double {
     let d = a - b
     return d.x * d.x + d.y * d.y

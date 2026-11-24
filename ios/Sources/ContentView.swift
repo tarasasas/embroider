@@ -106,10 +106,8 @@ struct ContentView: View {
                                     result.pattern.threads.count, result.minutes))
                         ForEach(Array(result.pattern.threads.enumerated()), id: \.offset) { i, t in
                             HStack {
-                                Circle()
-                                    .fill(Color(red: Double(t.r) / 255, green: Double(t.g) / 255, blue: Double(t.b) / 255))
-                                    .frame(width: 22, height: 22)
-                                    .overlay(Circle().stroke(Color.gray.opacity(0.4)))
+                                ColorPicker("Thread \(i + 1) color", selection: colorBinding(i), supportsOpacity: false)
+                                    .labelsHidden()
                                 Text("\(i + 1). \(t.name)")
                                 Spacer()
                                 Text("\(t.stitches) st").foregroundStyle(.secondary)
@@ -206,6 +204,36 @@ struct ContentView: View {
             if settings.heightMM < 10 { settings.heightMM = newHoop.sizeMM.h - 10 }
         }
         .onChange(of: fabric) { _ in applyAutomatic() }
+    }
+
+    /// Lets the user change a thread's color after conversion; the stitches stay the same.
+    private func colorBinding(_ i: Int) -> Binding<Color> {
+        Binding<Color>(
+            get: {
+                guard let t = result?.pattern.threads[safe: i] else { return .gray }
+                return Color(red: Double(t.r) / 255, green: Double(t.g) / 255, blue: Double(t.b) / 255)
+            },
+            set: { newColor in
+                var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+                UIColor(newColor).getRed(&r, green: &g, blue: &b, alpha: &a)
+                guard result != nil, i < result!.pattern.threads.count else { return }
+                let rgb = RGB(r: Int((r * 255).rounded()), g: Int((g * 255).rounded()), b: Int((b * 255).rounded()))
+                result!.pattern.threads[i].r = rgb.r
+                result!.pattern.threads[i].g = rgb.g
+                result!.pattern.threads[i].b = rgb.b
+                result!.pattern.threads[i].name = ThreadChart.threads[nearestBrother(rgb)].name
+                refreshOutputs()
+            }
+        )
+    }
+
+    /// Redraws the preview and rewrites the .pes after a color change.
+    private func refreshOutputs() {
+        guard let pattern = result?.pattern else { return }
+        preview = Digitizer.preview(pattern)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("design.pes")
+        try? PES.data(for: pattern).write(to: url)
+        fileURL = url
     }
 
     /// Sets every stitch setting from the chosen fabric. These are good defaults for most designs.

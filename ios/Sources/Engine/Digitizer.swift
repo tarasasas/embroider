@@ -107,7 +107,7 @@ enum Digitizer {
             UIColor(red: 0.93, green: 0.91, blue: 0.88, alpha: 1).setFill()
             ctx.fill(CGRect(origin: .zero, size: size))
             let g = ctx.cgContext
-            g.setLineWidth(max(1, 0.4 * ppm))
+            g.setLineWidth(max(1, 0.55 * ppm))  // thread looks a bit wider than 0.4 mm once it puffs up
             g.setLineCap(.round)
             g.setLineJoin(.round)
 
