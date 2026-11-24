@@ -2,6 +2,7 @@ import SwiftUI
 import PhotosUI
 
 /// Fabric presets: the stitch density and pull compensation that suit each fabric.
+/// (The names must match the PC app's, which receives the fabric name.)
 enum Fabric: String, CaseIterable, Identifiable {
     case woven = "Woven cotton"
     case knit = "T-shirt / knit"
@@ -60,19 +61,30 @@ enum Hoop: String, CaseIterable, Identifiable {
 }
 
 private let mmPerInch = 25.4
+private let lineTypes = ["none", "running", "triple", "satin"]
 
 struct ContentView: View {
+    @AppStorage("pcHost") private var pcHost = ""
+    @AppStorage("pcCode") private var pcCode = ""
+
     @State private var pickerItem: PhotosPickerItem?
     @State private var image: UIImage?
     @State private var settings = Settings()
     @State private var hoop: Hoop = .fourByFour
     @State private var fabric: Fabric = .woven
+    @State private var edge = "none"
+    @State private var outline = "none"
     @State private var showAdvanced = false
-    @State private var result: ConversionResult?
-    @State private var preview: UIImage?
+    @State private var showPC = false
+
+    @State private var design: Design?
     @State private var fileURL: URL?
+    @State private var recolor: [Int: RGB] = [:]
+    @State private var recolorTask: Task<Void, Never>?
     @State private var busy = false
     @State private var errorText: String?
+    @State private var notice: String?
+    @State private var pcStatus = ""
 
     init() {
         var s = Settings()
@@ -80,6 +92,8 @@ struct ContentView: View {
         s.heightMM = 90
         _settings = State(initialValue: s)
     }
+
+    private var pcConfigured: Bool { !pcHost.trimmingCharacters(in: .whitespaces).isEmpty }
 
     var body: some View {
         NavigationStack {
@@ -90,21 +104,18 @@ struct ContentView: View {
                     }
                 }
 
-                if let preview {
+                if let design {
                     Section("Stitch preview") {
-                        Image(uiImage: preview)
+                        Image(uiImage: design.preview)
                             .resizable()
                             .scaledToFit()
                             .frame(maxWidth: .infinity)
                     }
-                }
-
-                if let result {
-                    Section("Design") {
+                    Section {
                         Text(String(format: "%.1f x %.1f in, %d stitches, %d colors, about %.0f min",
-                                    result.widthMM / mmPerInch, result.heightMM / mmPerInch, result.stitchCount,
-                                    result.pattern.threads.count, result.minutes))
-                        ForEach(Array(result.pattern.threads.enumerated()), id: \.offset) { i, t in
+                                    design.widthMM / mmPerInch, design.heightMM / mmPerInch, design.stitchCount,
+                                    design.threads.count, design.minutes))
+                        ForEach(Array(design.threads.enumerated()), id: \.offset) { i, t in
                             HStack {
                                 ColorPicker("Thread \(i + 1) color", selection: colorBinding(i), supportsOpacity: false)
                                     .labelsHidden()
@@ -118,9 +129,18 @@ struct ContentView: View {
                                 Label("Save / share .pes file", systemImage: "square.and.arrow.up")
                             }
                         }
+                    } header: {
+                        Text(design.fromPC ? "Design (made on your PC)" : "Design (made on this phone)")
+                    } footer: {
+                        if !design.fromPC {
+                            Text("Phone-made designs only use simple fill stitching. Connect to your PC for the full quality.")
+                        }
                     }
                 }
 
+                if let notice {
+                    Section { Text(notice).foregroundStyle(.orange) }
+                }
                 if let errorText {
                     Section { Text(errorText).foregroundStyle(.red) }
                 }
@@ -151,6 +171,12 @@ struct ContentView: View {
 
                 Section {
                     DisclosureGroup("Advanced (optional)", isExpanded: $showAdvanced) {
+                        Picker("Outline", selection: $outline) {
+                            ForEach(lineTypes, id: \.self) { Text($0.capitalized).tag($0) }
+                        }
+                        Picker("Color edges", selection: $edge) {
+                            ForEach(lineTypes, id: \.self) { Text($0.capitalized).tag($0) }
+                        }
                         Stepper("Detail cleanup: \(settings.cleanup)", value: $settings.cleanup, in: 0...3)
                         Toggle("Use Brother thread colors", isOn: $settings.brotherColors)
                         Toggle("Underlay", isOn: $settings.underlay)
@@ -164,7 +190,25 @@ struct ContentView: View {
                         Button("Reset to automatic settings") { applyAutomatic() }
                     }
                 } footer: {
-                    Text("Stitch settings are in millimetres, the unit thread and machines use. Smaller row spacing = denser stitching.")
+                    Text("Outline and edges are made by your PC. The stitch settings only affect phone-made designs; on the PC, the fabric picks them. Stitch settings are in millimetres.")
+                }
+
+                Section {
+                    DisclosureGroup("PC connection", isExpanded: $showPC) {
+                        TextField("PC address, e.g. 192.168.1.20:8793", text: $pcHost)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
+                        TextField("Pairing code", text: $pcCode)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        Button("Test connection") { testConnection() }
+                        if !pcStatus.isEmpty { Text(pcStatus).font(.footnote) }
+                    }
+                } footer: {
+                    Text(pcConfigured
+                         ? "Designs are made on your PC (full quality) and downloaded here. If the PC can't be reached, the phone makes a simpler version."
+                         : "Not connected: designs are made on this phone with simple fill stitching. On your PC, run show_phone_info.bat to get the address and code.")
                 }
 
                 Section {
@@ -206,33 +250,53 @@ struct ContentView: View {
         .onChange(of: fabric) { _ in applyAutomatic() }
     }
 
+    // MARK: - Colors
+
     /// Lets the user change a thread's color after conversion; the stitches stay the same.
     private func colorBinding(_ i: Int) -> Binding<Color> {
         Binding<Color>(
             get: {
-                guard let t = result?.pattern.threads[safe: i] else { return .gray }
+                guard let t = design?.threads[safe: i] else { return .gray }
                 return Color(red: Double(t.r) / 255, green: Double(t.g) / 255, blue: Double(t.b) / 255)
             },
             set: { newColor in
                 var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
                 UIColor(newColor).getRed(&r, green: &g, blue: &b, alpha: &a)
-                guard result != nil, i < result!.pattern.threads.count else { return }
                 let rgb = RGB(r: Int((r * 255).rounded()), g: Int((g * 255).rounded()), b: Int((b * 255).rounded()))
-                result!.pattern.threads[i].r = rgb.r
-                result!.pattern.threads[i].g = rgb.g
-                result!.pattern.threads[i].b = rgb.b
-                result!.pattern.threads[i].name = ThreadChart.threads[nearestBrother(rgb)].name
-                refreshOutputs()
+                recolorThread(i, rgb)
             }
         )
     }
 
-    /// Redraws the preview and rewrites the .pes after a color change.
-    private func refreshOutputs() {
-        guard let pattern = result?.pattern else { return }
-        preview = Digitizer.preview(pattern)
+    private func recolorThread(_ i: Int, _ rgb: RGB) {
+        guard design != nil, i < design!.threads.count else { return }
+        design!.threads[i].r = rgb.r
+        design!.threads[i].g = rgb.g
+        design!.threads[i].b = rgb.b
+        design!.threads[i].name = ThreadChart.threads[nearestBrother(rgb)].name
+
+        if design!.fromPC {
+            // the PC rebuilds the file with the new color; wait until the picker stops changing
+            recolor[i] = rgb
+            recolorTask?.cancel()
+            recolorTask = Task {
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                if !Task.isCancelled { generate(keepColors: true) }
+            }
+        } else if var pattern = design!.pattern {
+            pattern.threads[i].r = rgb.r
+            pattern.threads[i].g = rgb.g
+            pattern.threads[i].b = rgb.b
+            design!.pattern = pattern
+            design!.preview = Digitizer.preview(pattern)
+            design!.pes = PES.data(for: pattern)
+            writeFile(design!.pes)
+        }
+    }
+
+    private func writeFile(_ data: Data) {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("design.pes")
-        try? PES.data(for: pattern).write(to: url)
+        try? data.write(to: url)
         fileURL = url
     }
 
@@ -247,6 +311,8 @@ struct ContentView: View {
         settings.brotherColors = true
         settings.trimMM = 3
     }
+
+    // MARK: - Controls
 
     private func inchSlider(_ title: String, _ mm: Binding<Double>, maxMM: Double) -> some View {
         let inches = Binding<Double>(get: { mm.wrappedValue / mmPerInch }, set: { mm.wrappedValue = $0 * mmPerInch })
@@ -263,26 +329,71 @@ struct ContentView: View {
         }
     }
 
-    private func generate() {
-        guard let img = image, !busy else { return }
-        let s = settings
-        busy = true
-        errorText = nil
+    // MARK: - PC and conversion
+
+    private func testConnection() {
+        pcStatus = "Connecting..."
+        let client = PCClient(host: pcHost, token: pcCode)
         Task {
             do {
-                let out = try await Task.detached(priority: .userInitiated) { () -> (ConversionResult, UIImage, Data) in
-                    let r = try Digitizer.convert(img, s)
-                    return (r, Digitizer.preview(r.pattern), PES.data(for: r.pattern))
-                }.value
-                let url = FileManager.default.temporaryDirectory.appendingPathComponent("design.pes")
-                try out.2.write(to: url)
-                result = out.0
-                preview = out.1
-                fileURL = url
+                let name = try await client.ping()
+                pcStatus = "Connected to \(name)."
             } catch {
-                errorText = error.localizedDescription
+                pcStatus = error.localizedDescription
+            }
+        }
+    }
+
+    private func generate(keepColors: Bool = false) {
+        guard let img = image, !busy else { return }
+        if !keepColors { recolor = [:] }
+        let s = settings
+        let fabricName = fabric.rawValue
+        let edgeType = edge, outlineType = outline
+        let overrides = recolor
+        let client = pcConfigured ? PCClient(host: pcHost, token: pcCode) : nil
+        busy = true
+        errorText = nil
+        notice = nil
+        Task {
+            var made: Design?
+            if let client {
+                do {
+                    made = try await client.convert(image: img, settings: s, fabric: fabricName, edge: edgeType,
+                                                    outline: outlineType, recolor: overrides)
+                } catch let error as PCError {
+                    switch error {
+                    case .rejected(let message):
+                        errorText = message  // a real problem with the image: the phone won't do better
+                    default:
+                        notice = "\(error.localizedDescription) Made a simpler version on the phone instead."
+                    }
+                } catch {
+                    notice = "PC connection failed. Made a simpler version on the phone instead."
+                }
+            }
+            if made == nil && errorText == nil {
+                made = await convertOnPhone(img, s)
+            }
+            if let made {
+                design = made
+                writeFile(made.pes)
             }
             busy = false
+        }
+    }
+
+    private func convertOnPhone(_ img: UIImage, _ s: Settings) async -> Design? {
+        do {
+            return try await Task.detached(priority: .userInitiated) { () -> Design in
+                let r = try Digitizer.convert(img, s)
+                return Design(threads: r.pattern.threads, widthMM: r.widthMM, heightMM: r.heightMM,
+                              stitchCount: r.stitchCount, minutes: r.minutes, pes: PES.data(for: r.pattern),
+                              preview: Digitizer.preview(r.pattern), fromPC: false, pattern: r.pattern)
+            }.value
+        } catch {
+            errorText = error.localizedDescription
+            return nil
         }
     }
 }

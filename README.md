@@ -19,6 +19,21 @@ python app.py
 
 Sizes are in inches. Tick **Show advanced settings** for fill type (satin for narrow shapes, tatami for large areas), edges, outline and the stitch settings in millimetres.
 
+## Using it from the iPhone app
+
+The iPhone app can send an image to this PC and download the finished `.pes`. The stitches are
+made by the same engine as the desktop app, so they are identical.
+
+1. On the PC, double-click `install_autostart.bat` once. It starts a small background server
+   every time you sign in to Windows (undo with `uninstall_autostart.bat`). Or run `run_server.bat`
+   when you need it. If Windows asks, allow Python on **private** networks.
+2. Double-click `show_phone_info.bat` to see the PC's address and pairing code.
+3. In the phone app, open **PC connection**, type the address and code, and tap **Test connection**.
+
+The phone and PC must be on the same Wi-Fi network, and the PC must be on (not asleep). The phone
+cannot wake or launch the PC. If the PC can't be reached, the app makes a simpler version on the phone.
+The link is plain HTTP on your home network, protected only by the pairing code, so don't use it on public Wi-Fi.
+
 An iPhone version (SwiftUI) is in `ios/`. See `.github/workflows/ios.yml`; it builds an unsigned IPA you can sideload.
 
 Command line:
