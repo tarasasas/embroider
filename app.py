@@ -52,6 +52,7 @@ class App(tk.Tk):
         self.height_in = tk.DoubleVar(value=round((dz.HOOPS[hoop][1] - 10) / MM_PER_INCH, 2))
         self.shirt_rgb = realistic.SHIRT_WHITE  # preview only: the fabric the design is shown on
         self.realistic_view = tk.BooleanVar(value=True)
+        self.bold = tk.DoubleVar(value=0.0)  # mm added around every shape: bolder lines
         self.lock = tk.BooleanVar(value=True)  # keep width x height in the image's proportions
         self.aspect = 1.0
         self._syncing = False
@@ -117,6 +118,7 @@ class App(tk.Tk):
         self._spin(basics, 2, "Thread colors (0 = auto)", self.colors, 0, 15, 1)
         ttk.Checkbutton(basics, text="Remove background", variable=self.remove_bg).grid(
             row=3, column=0, columnspan=2, sticky="w", pady=2)
+        self._spin(basics, 6, "Bolder lines (mm, 0-1)", self.bold, 0, 1.0, 0.1)
         ttk.Label(basics, text="Shirt color (preview)").grid(row=4, column=0, sticky="w", pady=2)
         self.shirt_btn = tk.Button(basics, width=6, relief="solid", borderwidth=1, cursor="hand2",
                                    background=dz.hex_color(self.shirt_rgb), command=self._pick_shirt)
@@ -362,6 +364,7 @@ class App(tk.Tk):
             s = dz.Settings(
                 width_mm=float(self.width_in.get()) * MM_PER_INCH, height_mm=float(self.height_in.get()) * MM_PER_INCH,
                 colors=int(self.colors.get()), remove_background=self.remove_bg.get(),
+                bold_mm=min(max(float(self.bold.get()), 0.0), 1.0),
                 brother_colors=self.brother.get(), cleanup=int(self.cleanup.get()),
                 fill_type=self.fill_type.get(), fill_pattern=self.fill_pattern.get(),
                 knockdown=self.knockdown.get(), applique=set(self.applique),

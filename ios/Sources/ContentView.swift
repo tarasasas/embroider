@@ -172,6 +172,10 @@ struct ContentView: View {
                     Stepper(settings.colors == 0 ? "Thread colors: Auto" : "Thread colors: \(settings.colors)",
                             value: $settings.colors, in: 0...15)
                     Toggle("Remove background", isOn: $settings.removeBackground)
+                    VStack(alignment: .leading) {
+                        Text(settings.boldMM < 0.05 ? "Bolder lines: off" : String(format: "Bolder lines: +%.1f mm", settings.boldMM))
+                        Slider(value: $settings.boldMM, in: 0...1.0, step: 0.1)
+                    }
                 } header: {
                     Text("Basics")
                 } footer: {

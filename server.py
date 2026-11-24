@@ -82,6 +82,7 @@ def build_settings(request):
     s.colors = int(_num(request, "colors", 0, 0, 15))  # 0 = automatic
     s.cleanup = int(_num(request, "cleanup", s.cleanup, 0, 3))
     s.remove_background = bool(request.get("remove_background", True))
+    s.bold_mm = _num(request, "bold_mm", 0.0, 0.0, 1.0)
     s.brother_colors = bool(request.get("brother_colors", True))
     for key, allowed in (("fill_type", dz.FILL_TYPES), ("edge", dz.LINE_TYPES), ("outline", dz.LINE_TYPES)):
         if request.get(key) in allowed:

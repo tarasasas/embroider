@@ -75,7 +75,7 @@ struct PCClient {
         let body: [String: Any] = [
             "image": png.base64EncodedString(),
             "width_mm": settings.widthMM, "height_mm": settings.heightMM,
-            "colors": settings.colors, "remove_background": settings.removeBackground,
+            "colors": settings.colors, "remove_background": settings.removeBackground, "bold_mm": settings.boldMM,
             "fabric": fabric, "edge": edge, "outline": outline, "recolor": colors,
         ]
         var request = URLRequest(url: try url("/convert"), timeoutInterval: 180)

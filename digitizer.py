@@ -81,6 +81,7 @@ class Settings:
     mirror: bool = False
     colors: int = 4  # thread colors, not counting the removed background; 0 = choose automatically
     remove_background: bool = True
+    bold_mm: float = 0.0  # thickens every shape by this much on each side (bolder lines; thin white gaps close)
     brother_colors: bool = False  # snap colors to the Brother thread chart
     cleanup: int = 1  # 0-3: removes specks and smooths jagged edges
     color_edits: dict = field(default_factory=dict)  # {cluster rgb: new rgb, or None to skip it}
@@ -1407,6 +1408,9 @@ def digitize(labels, palette, s: Settings, groups=None):
     satin_width = {"auto": s.satin_max_mm, "satin": 12.0, "tatami": 0.0}[s.fill_type]
     pen, blocks, all_polys = None, [], []
     shapes = [_mask_polygons(labels == ci, s.min_area_mm2) if (labels == ci).any() else [] for ci in range(len(palette))]
+    if s.bold_mm > 0:  # bolder lines: grow every shape outward (rounded), then tidy the outline
+        shapes = [[q.simplify(0.02) for q in _polygons_of(unary_union(polys).buffer(s.bold_mm))] if polys else []
+                  for polys in shapes]
     for ci, rgb in enumerate(palette):
         polys = shapes[ci]
         if not polys:
