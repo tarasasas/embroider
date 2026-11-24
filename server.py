@@ -181,6 +181,18 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, reply)
 
 
+class ExclusiveServer(ThreadingHTTPServer):
+    """Only one copy of the server may own the port. Windows otherwise lets a second copy bind
+    the same port silently, and an old copy keeps answering the phone with old code."""
+
+    allow_reuse_address = False
+
+    def server_bind(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def main():
     Handler.token = load_token()
     if "--info" in sys.argv:  # just show the address and pairing code, e.g. when it runs in the background
@@ -192,7 +204,7 @@ def main():
         print(f"Pairing code:              {Handler.token}")
         return
     try:
-        server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+        server = ExclusiveServer(("0.0.0.0", PORT), Handler)
     except OSError:
         print(f"Port {PORT} is already in use. Is the server already running?")
         sys.exit(1)
