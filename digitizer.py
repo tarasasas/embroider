@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import math
+from collections import deque
 import os
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -29,7 +30,7 @@ from types import SimpleNamespace
 import numpy as np
 import shapely
 from scipy.spatial import Voronoi, cKDTree
-from shapely.geometry import Point, Polygon
+from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from pyembroidery import COLOR_CHANGE, END, JUMP, STITCH, TRIM, EmbPattern, EmbThread
@@ -1015,6 +1016,70 @@ def _tidy(run, max_len=7.0, min_len=0.2):
     return final
 
 
+class _Router:
+    """Finds a path between two points that stays inside one color's shapes (grid search),
+    so the needle can travel there with small hidden stitches instead of a trim."""
+
+    CELL = 0.4  # mm
+
+    def __init__(self, inside):
+        self.inside = inside
+        x0, y0, x1, y1 = inside.bounds
+        self.x0, self.y0 = x0, y0
+        self.w = max(1, int(math.ceil((x1 - x0) / self.CELL)) + 1)
+        self.h = max(1, int(math.ceil((y1 - y0) / self.CELL)) + 1)
+        gx, gy = np.meshgrid(x0 + np.arange(self.w) * self.CELL, y0 + np.arange(self.h) * self.CELL)
+        self.ok = shapely.contains_xy(inside, gx, gy)
+
+    def _cell(self, p):
+        cx = int(round((p[0] - self.x0) / self.CELL))
+        cy = int(round((p[1] - self.y0) / self.CELL))
+        if 0 <= cx < self.w and 0 <= cy < self.h and self.ok[cy, cx]:
+            return cy, cx
+        best = None  # the point sits right at an edge: use the nearest open cell close by
+        for dy in range(-2, 3):
+            for dx in range(-2, 3):
+                y, x = cy + dy, cx + dx
+                if 0 <= x < self.w and 0 <= y < self.h and self.ok[y, x]:
+                    d = dx * dx + dy * dy
+                    if best is None or d < best[0]:
+                        best = (d, (y, x))
+        return best[1] if best else None
+
+    def path(self, a, b, max_len):
+        if self.inside.contains(LineString([a, b])):
+            return [a, b]
+        start, goal = self._cell(a), self._cell(b)
+        if start is None or goal is None:
+            return None
+        prev = {start: None}
+        queue = deque([start])
+        steps = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
+        while queue:
+            cur = queue.popleft()
+            if cur == goal:
+                break
+            for dy, dx in steps:
+                nxt = (cur[0] + dy, cur[1] + dx)
+                if 0 <= nxt[0] < self.h and 0 <= nxt[1] < self.w and self.ok[nxt] and nxt not in prev:
+                    prev[nxt] = cur
+                    queue.append(nxt)
+        if goal not in prev:
+            return None
+        cells, cur = [], goal
+        while cur is not None:
+            cells.append(cur)
+            cur = prev[cur]
+        pts = [a] + [(self.x0 + x * self.CELL, self.y0 + y * self.CELL) for y, x in reversed(cells)] + [b]
+        line = LineString(pts)
+        simple = line.simplify(0.3)
+        if self.inside.buffer(0.1).contains(simple):
+            line = simple
+        if line.length > max_len:
+            return None
+        return [tuple(c) for c in line.coords]
+
+
 def digitize(labels, palette, s: Settings):
     """Builds the stitch pattern. Returns (pattern, sources): sources[i] is the palette index
     sewn by thread i, or "outline"."""
@@ -1065,14 +1130,14 @@ def digitize(labels, palette, s: Settings):
             edge, pen = _line_runs(_rings(polys), s.edge, s.edge_width_mm, pen, s)
             runs += edge
         if runs:
-            blocks.append((rgb, runs, ci))
+            blocks.append((rgb, runs, ci, unary_union(polys)))
 
     if s.outline != "none" and blocks:
         union = unary_union([p.buffer(max(0.0, s.outline_offset_mm)) for p in all_polys])
         shell = [Polygon(p.exterior) for p in _polygons_of(union)]  # outer edge only, holes ignored
         runs, pen = _line_runs(_rings(shell), s.outline, s.outline_width_mm, pen, s)
         if runs:
-            blocks.append((tuple(s.outline_color), runs, "outline"))
+            blocks.append((tuple(s.outline_color), runs, "outline", None))
 
     if not blocks:
         raise ValueError("Nothing to stitch. Try more colors, or turn off background removal.")
@@ -1081,7 +1146,7 @@ def digitize(labels, palette, s: Settings):
         return (p[0] - center[0]) * UNITS_PER_MM, (p[1] - center[1]) * UNITS_PER_MM
 
     pattern = EmbPattern()
-    for rgb, runs, _ in blocks:
+    for rgb, runs, _, region in blocks:
         if pattern.threadlist:
             pattern.trim()
             pattern.color_change()
@@ -1091,20 +1156,40 @@ def digitize(labels, palette, s: Settings):
         thread.brand = "Brother"
         pattern.add_thread(thread)
 
+        # Moving to the next part of the same color: if a straight path stays inside this color's
+        # shapes, sew small running stitches along it (hidden in the same-color stitching) instead
+        # of cutting the thread. Every trim leaves a tail on the fabric, so this is much cleaner.
+        inside = region.buffer(-0.2) if region is not None else None
+        router = None
+        if inside is not None and not inside.is_empty:
+            shapely.prepare(inside)
+            router = _Router(inside)
         last = None
         for run in runs:
             run = _tidy(run)
             if len(run) < 2:
                 continue
-            if last is not None and math.dist(last, run[0]) > s.trim_mm:
-                pattern.trim()
-            pattern.add_stitch_absolute(JUMP, *units(run[0]))
+            gap = math.dist(last, run[0]) if last is not None else 0.0
+            route = None
+            if last is not None and gap > 0.05 and router is not None:
+                route = router.path(tuple(last), tuple(run[0]), max_len=max(25.0, 2.5 * gap))
+            if route:
+                path = [route[0]]
+                for p in route[1:]:
+                    _travel(path, p, 2.5)
+                    path.append(p)
+                for p in path[1:]:
+                    pattern.add_stitch_absolute(STITCH, *units(p))
+            else:
+                if last is not None and gap > s.trim_mm:
+                    pattern.trim()
+                pattern.add_stitch_absolute(JUMP, *units(run[0]))
             for p in run:  # the first stitch anchors the thread at the run start
                 pattern.add_stitch_absolute(STITCH, *units(p))
             last = run[-1]
     pattern.trim()
     pattern.end()
-    return pattern, [source for _, _, source in blocks]
+    return pattern, [source for _, _, source, _ in blocks]
 
 
 # --------------------------------------------------------------------------- output
