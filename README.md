@@ -12,10 +12,14 @@ pip install -r requirements.txt
 python app.py
 ```
 
-1. **Open image...**: the app generates a first version right away.
-2. Choose your **hoop**, the number of **thread colors**, and other settings, then click **Generate stitches**.
-3. Look at the **Stitch preview** tab and the thread list. The list shows the closest Brother thread name for each color, in sewing order.
+1. **Open image...** (or **Lettering...** to type words): the app generates a first version right away.
+2. Pick your **hoop** and **fabric**. The fabric sets the stitch density, pull compensation and the rest for you, and shows the stabilizer to use. Change the number of **thread colors** if needed, then click **Generate stitches**.
+3. Look at the **Stitch preview** tab and the thread list. The list shows the closest Brother thread name for each color, in sewing order. Click a color swatch to change that thread's color. The **Sew simulation** tab replays the stitching in machine order.
 4. **Save embroidery file...** to write a `.pes`. Copy it to a USB stick, or send it to the machine over USB or wireless.
+
+Sizes are in inches. Tick **Show advanced settings** for fill type (satin for narrow shapes, tatami for large areas), edges, outline and the stitch settings in millimetres.
+
+An iPhone version (SwiftUI) is in `ios/`. See `.github/workflows/ios.yml`; it builds an unsigned IPA you can sideload.
 
 Command line:
 
@@ -53,4 +57,4 @@ python digitizer.py --help
 show. Underlay rows go at 90 degrees under the fill. Stitches, jumps, trims and color changes are written with
 [pyembroidery](https://github.com/EmbroidePy/pyembroidery), which also adds tie-in/tie-off lock stitches.
 
-It only does fill stitches. It doesn't do satin columns or outlines.
+In "auto" fill mode, narrow shapes become satin columns and wide areas get tatami fill. The iPhone version only does tatami fill.

@@ -130,7 +130,9 @@ def list_fonts() -> dict:
                 continue
             path = os.path.join(folder, name)
             try:
-                family, style = ImageFont.truetype(path, 10).getname()
+                probe = ImageFont.truetype(path, 10)
+                family, style = probe.getname()
+                probe.getbbox("Ag")  # skip fonts that load but can't draw text
             except Exception:
                 continue
             label = family if style in ("Regular", "Normal", "Book", "Roman") else f"{family} {style}"
@@ -144,6 +146,7 @@ def make_text_image(text, font_path, color=(0, 0, 0), size_px=300) -> Image.Imag
     spacing, pad = size_px // 6, size_px // 8
     probe = ImageDraw.Draw(Image.new("L", (1, 1)))
     x0, y0, x1, y1 = probe.multiline_textbbox((0, 0), text, font=font, align="center", spacing=spacing)
+    x0, y0, x1, y1 = math.floor(x0), math.floor(y0), math.ceil(x1), math.ceil(y1)  # some fonts give floats
     img = Image.new("RGBA", (x1 - x0 + 2 * pad, y1 - y0 + 2 * pad), (0, 0, 0, 0))
     ImageDraw.Draw(img).multiline_text((pad - x0, pad - y0), text, font=font, fill=tuple(color) + (255,),
                                        align="center", spacing=spacing)
