@@ -212,7 +212,8 @@ func reduceColors(_ image: UIImage, _ s: Settings) throws -> Reduced {
         }
     }
     let fit = flat.count * 5 >= opaqueCount ? flat : all  // photos have few flat pixels
-    let centers = kmeans(fit, k: s.colors + extraBackground)
+    let wanted = s.colors > 0 ? s.colors : 4  // "Auto" is decided by the PC; the phone fallback uses 4
+    let centers = kmeans(fit, k: wanted + extraBackground)
 
     var labels = [Int16](repeating: -1, count: w * h)
     for i in 0..<(w * h) where opaque[i] {

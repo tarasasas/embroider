@@ -70,7 +70,7 @@ struct ContentView: View {
     @State private var image: UIImage?
     @State private var settings = Settings()
     @State private var hoop: Hoop = .fourByFour
-    @State private var fabric: Fabric = .woven
+    @State private var fabric: Fabric = .knit
     @State private var edge = "none"
     @State private var outline = "none"
     @State private var showAdvanced = false
@@ -91,6 +91,7 @@ struct ContentView: View {
         var s = Settings()
         s.widthMM = 90
         s.heightMM = 90
+        s.colors = 0  // automatic
         _settings = State(initialValue: s)
     }
 
@@ -163,7 +164,8 @@ struct ContentView: View {
                     Picker("Fabric", selection: $fabric) {
                         ForEach(Fabric.allCases) { Text($0.rawValue).tag($0) }
                     }
-                    Stepper("Thread colors: \(settings.colors)", value: $settings.colors, in: 1...15)
+                    Stepper(settings.colors == 0 ? "Thread colors: Auto" : "Thread colors: \(settings.colors)",
+                            value: $settings.colors, in: 0...15)
                     Toggle("Remove background", isOn: $settings.removeBackground)
                 } header: {
                     Text("Basics")
@@ -415,6 +417,7 @@ struct ContentView: View {
             }
             if let made {
                 design = made
+                if made.heightMM > 0 { aspect = made.widthMM / made.heightMM }  // lock follows the design itself
                 writeFile(made.pes)
             }
             busy = false

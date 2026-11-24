@@ -23,7 +23,7 @@ import argparse
 import math
 from collections import deque
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from types import SimpleNamespace
 
@@ -74,7 +74,7 @@ class Settings:
     height_mm: float = 90.0
     rotate: int = 0  # clockwise degrees: 0, 90, 180 or 270
     mirror: bool = False
-    colors: int = 4  # thread colors, not counting the removed background
+    colors: int = 4  # thread colors, not counting the removed background; 0 = choose automatically
     remove_background: bool = True
     brother_colors: bool = False  # snap colors to the Brother thread chart
     cleanup: int = 1  # 0-3: removes specks and smooths jagged edges
@@ -185,11 +185,44 @@ def _color_distance(a, b):
     return (2 + rm / 256) * dr * dr + 4 * dg * dg + (2 + (255 - rm) / 256) * db * db
 
 
+def _delta_e2000(lab, labs):
+    """CIEDE2000 color difference between one CIELAB color and an (N, 3) array of them."""
+    L1, a1, b1 = (float(v) for v in lab)
+    L2, a2, b2 = labs[:, 0].astype(float), labs[:, 1].astype(float), labs[:, 2].astype(float)
+    c_bar = (math.hypot(a1, b1) + np.hypot(a2, b2)) / 2
+    g = 0.5 * (1 - np.sqrt(c_bar ** 7 / (c_bar ** 7 + 25.0 ** 7)))
+    a1p, a2p = (1 + g) * a1, (1 + g) * a2
+    c1p, c2p = np.hypot(a1p, b1), np.hypot(a2p, b2)
+    h1p, h2p = np.degrees(np.arctan2(b1, a1p)) % 360, np.degrees(np.arctan2(b2, a2p)) % 360
+    dh = h2p - h1p
+    dh = np.where(dh > 180, dh - 360, np.where(dh < -180, dh + 360, dh))
+    dh = np.where(c1p * c2p == 0, 0, dh)
+    d_l, d_c = L2 - L1, c2p - c1p
+    d_h = 2 * np.sqrt(c1p * c2p) * np.sin(np.radians(dh / 2))
+    l_bar, cp_bar, h_sum = (L1 + L2) / 2, (c1p + c2p) / 2, h1p + h2p
+    h_bar = np.where(c1p * c2p == 0, h_sum,
+                     np.where(np.abs(h1p - h2p) <= 180, h_sum / 2,
+                              np.where(h_sum < 360, (h_sum + 360) / 2, (h_sum - 360) / 2)))
+    t = (1 - 0.17 * np.cos(np.radians(h_bar - 30)) + 0.24 * np.cos(np.radians(2 * h_bar))
+         + 0.32 * np.cos(np.radians(3 * h_bar + 6)) - 0.20 * np.cos(np.radians(4 * h_bar - 63)))
+    d_theta = 30 * np.exp(-(((h_bar - 275) / 25) ** 2))
+    r_c = 2 * np.sqrt(cp_bar ** 7 / (cp_bar ** 7 + 25.0 ** 7))
+    s_l = 1 + 0.015 * (l_bar - 50) ** 2 / np.sqrt(20 + (l_bar - 50) ** 2)
+    s_c, s_h = 1 + 0.045 * cp_bar, 1 + 0.015 * cp_bar * t
+    r_t = -np.sin(np.radians(2 * d_theta)) * r_c
+    return np.sqrt((d_l / s_l) ** 2 + (d_c / s_c) ** 2 + (d_h / s_h) ** 2 + r_t * (d_c / s_c) * (d_h / s_h))
+
+
 def nearest_brother_thread(rgb):
-    """Returns ((r, g, b), name, chart_index) of the closest Brother thread."""
+    """Returns ((r, g, b), name, chart_index) of the closest Brother thread, by perceived color."""
     if not BROTHER_THREADS:
         return tuple(rgb), "", ""
-    return min(BROTHER_THREADS, key=lambda t: _color_distance(rgb, t[0]))
+    lab = _rgb_to_lab([rgb])[0]
+    if lab[0] < 22 and math.hypot(lab[1], lab[2]) < 10:  # very dark and nearly neutral: black thread
+        black = [t for t in BROTHER_THREADS if t[0] == (0, 0, 0)]
+        if black:
+            return black[0]
+    return BROTHER_THREADS[int(_delta_e2000(lab, _BROTHER_LAB).argmin())]
 
 
 def hex_color(rgb):
@@ -205,6 +238,9 @@ def _rgb_to_lab(rgb):
     xyz = lin @ m.T / np.array([0.95047, 1.0, 1.08883], np.float32)
     f = np.where(xyz > 0.008856, np.cbrt(xyz), 7.787 * xyz + 16 / 116)
     return np.stack([116 * f[:, 1] - 16, 500 * (f[:, 0] - f[:, 1]), 200 * (f[:, 1] - f[:, 2])], axis=1).astype(np.float32)
+
+
+_BROTHER_LAB = _rgb_to_lab([t[0] for t in BROTHER_THREADS]) if BROTHER_THREADS else None
 
 
 def _nearest_center(pixels, centers):
@@ -270,7 +306,26 @@ def _sort_by_area(labels, palette, groups):
     return remap[labels], [palette[i] for i in order], [groups[i] for i in order]
 
 
-def reduce_colors(img: Image.Image, s: Settings):
+def _auto_colors(fit_lab, max_k=10):
+    """How many distinct colors the art really has (background included).
+
+    Adds clusters until a new one is tiny or nearly the same color as another: anti-aliased
+    edges and JPEG noise then don't turn into extra threads.
+    """
+    for k in range(1, max_k + 1):
+        centers = _kmeans(fit_lab, k, attempts=2)
+        if len(centers) < k:
+            return len(centers)
+        if k == 1:
+            continue
+        share = np.bincount(_nearest_center(fit_lab, centers), minlength=k) / len(fit_lab)
+        gap = min(float(np.linalg.norm(centers[i] - centers[j])) for i in range(k) for j in range(i + 1, k))
+        if share.min() < 0.004 or gap < 14:  # 14 = clearly different colors in CIELAB units
+            return k - 1
+    return max_k
+
+
+def reduce_colors(img: Image.Image, s: Settings, _fit=True):
     """Scales the image to the working resolution and maps every pixel to a thread color.
 
     Returns (labels, palette, groups, skipped): labels is an (H, W) int array (-1 = leave
@@ -303,7 +358,8 @@ def reduce_colors(img: Image.Image, s: Settings):
         flat &= np.abs(a - np.roll(a, shift, axis)).max(axis=2) <= 30
     fit = rgb[flat] if flat.sum() >= 0.2 * opaque.sum() else rgb[opaque]  # photos have few flat pixels
     fit_lab = _rgb_to_lab(fit)
-    centers_lab = _kmeans(fit_lab, s.colors + extra_bg)
+    k = _auto_colors(fit_lab) if s.colors <= 0 else s.colors + extra_bg
+    centers_lab = _kmeans(fit_lab, k)
     fit_labels = _nearest_center(fit_lab, centers_lab)
     # thread colors are the plain average of each cluster's flat pixels
     centers = [fit[fit_labels == i].mean(axis=0) if np.any(fit_labels == i) else (128, 128, 128)
@@ -322,6 +378,18 @@ def reduce_colors(img: Image.Image, s: Settings):
         border = border[border >= 0]
         if border.size:
             labels[labels == np.bincount(border).argmax()] = -1
+
+    # The size the user asks for is the size of the stitched design, not of the picture: if the
+    # picture has an empty margin around the art, crop it away and scale the art to fill the box.
+    if _fit:
+        ys, xs = np.nonzero(labels >= 0)
+        if xs.size:
+            art_w, art_h = (xs.max() - xs.min() + 1) * PX_MM, (ys.max() - ys.min() + 1) * PX_MM
+            if min(s.width_mm / art_w, s.height_mm / art_h) > 1.02:
+                sx, sy = w / size[0], h / size[1]
+                box = (max(0, int(xs.min() * sx) - 2), max(0, int(ys.min() * sy) - 2),
+                       min(w, int(math.ceil((xs.max() + 1) * sx)) + 2), min(h, int(math.ceil((ys.max() + 1) * sy)) + 2))
+                return reduce_colors(img.crop(box), replace(s, mirror=False, rotate=0), _fit=False)
 
     palette = [tuple(int(round(c)) for c in center) for center in centers]
     if s.brother_colors:

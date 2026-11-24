@@ -70,13 +70,13 @@ def _num(request, key, default, lo, hi):
 def build_settings(request):
     """Turns the phone's request into digitizer Settings. Anything missing gets a good default."""
     s = dz.Settings()
-    fabric = request.get("fabric", "Woven cotton")
+    fabric = request.get("fabric", "T-shirt / knit")
     values, _tip = dz.FABRICS.get(fabric, dz.FABRICS["Woven cotton"])
     for key, value in values.items():
         setattr(s, key, value)
     s.width_mm = _num(request, "width_mm", 90, 5, 400)
     s.height_mm = _num(request, "height_mm", 90, 5, 400)
-    s.colors = int(_num(request, "colors", s.colors, 1, 15))
+    s.colors = int(_num(request, "colors", 0, 0, 15))  # 0 = automatic
     s.cleanup = int(_num(request, "cleanup", s.cleanup, 0, 3))
     s.remove_background = bool(request.get("remove_background", True))
     s.brother_colors = bool(request.get("brother_colors", True))

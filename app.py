@@ -22,7 +22,7 @@ SAVE_TYPES = [
 TABS = [("original", "Original"), ("colors", "Color regions"), ("stitches", "Stitch preview")]
 SIM_TAB = len(TABS)  # the sewing simulator is the last tab
 MM_PER_INCH = 25.4
-DEFAULT_FABRIC = "Woven cotton"
+DEFAULT_FABRIC = "T-shirt / knit"
 
 
 class App(tk.Tk):
@@ -52,7 +52,7 @@ class App(tk.Tk):
         self.width_in.trace_add("write", lambda *_: self._size_edited("width"))
         self.height_in.trace_add("write", lambda *_: self._size_edited("height"))
         self.fabric = tk.StringVar(value=DEFAULT_FABRIC)
-        self.colors = tk.IntVar(value=d.colors)
+        self.colors = tk.IntVar(value=0)  # 0 = count the art's colors automatically
         self.cleanup = tk.IntVar(value=d.cleanup)
         self.remove_bg = tk.BooleanVar(value=d.remove_background)
         self.brother = tk.BooleanVar(value=True)
@@ -106,7 +106,7 @@ class App(tk.Tk):
         fabric.bind("<<ComboboxSelected>>", lambda e: self._apply_fabric())
         self.tip = ttk.Label(basics, text="", wraplength=290, foreground="#555", justify="left")
         self.tip.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 4))
-        self._spin(basics, 2, "Thread colors", self.colors, 1, 15, 1)
+        self._spin(basics, 2, "Thread colors (0 = auto)", self.colors, 0, 15, 1)
         ttk.Checkbutton(basics, text="Remove background", variable=self.remove_bg).grid(
             row=3, column=0, columnspan=2, sticky="w", pady=2)
 
@@ -351,7 +351,7 @@ class App(tk.Tk):
             return None
         s.width_mm = min(max(s.width_mm, 5), 400)
         s.height_mm = min(max(s.height_mm, 5), 400)
-        s.colors = min(max(s.colors, 1), 15)
+        s.colors = min(max(s.colors, 0), 15)
         s.cleanup = min(max(s.cleanup, 0), 3)
         s.row_spacing_mm = min(max(s.row_spacing_mm, 0.2), 3)
         s.satin_spacing_mm = min(max(s.satin_spacing_mm, 0.2), 2)
@@ -400,6 +400,8 @@ class App(tk.Tk):
             self.status.config(text=f"Error: {error}")
             return
         self.result = result
+        if result.info["height_mm"] > 0:  # from now on the lock keeps the design's own proportions
+            self.aspect = result.info["width_mm"] / result.info["height_mm"]
         self.images["colors"], self.images["stitches"] = previews
         self._update_status()
         self._set_threads(result.threads)
