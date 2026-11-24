@@ -8,10 +8,6 @@ struct LetteringFont: Identifiable {
     let postScript: String
     let category: String
     var id: String { postScript }
-    var initial: String {
-        let first = name.prefix(1).uppercased()
-        return first.rangeOfCharacter(from: .letters) == nil ? "#" : first
-    }
 
     private static let symbolFamilies: Set<String> = [
         "Zapf Dingbats", "Bodoni Ornaments", "Apple Color Emoji", "Apple Symbols", "Symbol",
@@ -64,9 +60,7 @@ struct LetteringView: View {
     @AppStorage("letteringText") private var savedText = "Bears"
     @AppStorage("letteringFont") private var savedFont = "Georgia-Bold"
     @State private var draft: LetteringDraft
-    @State private var category = "All"
-    @State private var search = ""
-    @State private var selectedLetter: Int?
+    @State private var fontPicker: FontPickerRequest?
     @State private var previousText = ""
     @State private var showStyle = false
     @State private var showMotif = false
@@ -88,13 +82,6 @@ struct LetteringView: View {
             ?? UIFont.systemFont(ofSize: LetteringRenderer.pointSize, weight: .heavy)
     }
 
-    private var matchingFonts: [LetteringFont] {
-        LetteringFont.all.filter {
-            (category == "All" || $0.category == category)
-                && (search.isEmpty || $0.name.localizedCaseInsensitiveContains(search))
-        }
-    }
-
     var body: some View {
         let selectedFont = motifOnly ? UIFont.systemFont(ofSize: LetteringRenderer.pointSize) : font
         let image = LetteringRenderer.render(draft, font: selectedFont, motifOnly: motifOnly)
@@ -110,7 +97,6 @@ struct LetteringView: View {
                                 .font(.system(size: 20, weight: .semibold))
                                 .lineLimit(1...4)
                             letterTargets
-                            fontWheel
                             DisclosureGroup("Style", isExpanded: $showStyle) { styleControls }
                         }
                     }
@@ -159,55 +145,36 @@ struct LetteringView: View {
                     Button("Hide keyboard") { editing = false }
                 }
             }
-            .onAppear {
-                previousText = draft.text
-                if !motifOnly { selectMatchingFont() }
-            }
+            .onAppear { previousText = draft.text }
             .onChange(of: draft.text) { text in
                 draft.remapLetterFonts(from: previousText)
                 previousText = text
-                selectedLetter = nil
             }
-            .onChange(of: category) { _ in selectMatchingFont() }
-            .onChange(of: search) { _ in selectMatchingFont() }
-        }
-    }
-
-    private func selectMatchingFont() {
-        let matches = matchingFonts
-        if !matches.contains(where: { $0.id == targetFont.wrappedValue }), let first = matches.first {
-            targetFont.wrappedValue = first.id
-        }
-    }
-
-    private var targetFont: Binding<String> {
-        Binding(
-            get: { selectedLetter.flatMap { draft.letterFonts[$0] } ?? draft.fontName },
-            set: { font in
-                if let selectedLetter {
-                    draft.letterFonts[selectedLetter] = font == draft.fontName ? nil : font
-                } else {
-                    draft.fontName = font
+            .fullScreenCover(item: $fontPicker) { request in
+                LetterFontPicker(draft: draft, selection: request.letter) { base, letters in
+                    draft.fontName = base
+                    draft.letterFonts = letters
                 }
             }
-        )
+        }
+    }
+
+    private struct FontPickerRequest: Identifiable {
+        let letter: Int?
+        var id: Int { letter ?? -1 }
     }
 
     private var letterTargets: some View {
         let characters = Array(draft.text)
         return VStack(alignment: .leading, spacing: 6) {
-            Text("Apply font to").font(.subheadline)
+            Text("Letter fonts").font(.subheadline)
             ScrollView(.horizontal) {
                 HStack(spacing: 6) {
-                    targetButton("Default", index: nil)
+                    targetButton("Default font", index: nil)
                     ForEach(characters.indices.filter { !characters[$0].isWhitespace }, id: \.self) { index in
                         targetButton(String(characters[index]), index: index)
                     }
                 }
-            }
-            if let selectedLetter, draft.letterFonts[selectedLetter] != nil {
-                Button("Use default font for this letter") { draft.letterFonts[selectedLetter] = nil }
-                    .buttonStyle(.borderless)
             }
         }
     }
@@ -216,20 +183,17 @@ struct LetteringView: View {
         let face = index.flatMap { draft.letterFonts[$0] } ?? draft.fontName
         return Button {
             editing = false
-            selectedLetter = index
-            category = "All"
-            search = ""
+            fontPicker = FontPickerRequest(letter: index)
         } label: {
             Text(label)
                 .font(index == nil ? .body : .custom(face, size: 20))
-                .padding(.horizontal, 8)
-                .frame(minWidth: 36, minHeight: 36)
-                .background(selectedLetter == index ? Color.accentColor.opacity(0.2) : Color(.tertiarySystemFill),
-                            in: RoundedRectangle(cornerRadius: 7))
+                .padding(.horizontal, 10)
+                .frame(minWidth: 40, minHeight: 44)
+                .background(Color.accentColor.opacity(draft.letterFonts[index ?? -1] == nil ? 0.08 : 0.18),
+                            in: RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(index.map { "Character \($0 + 1), \(label)" } ?? "Default font")
-        .accessibilityAddTraits(selectedLetter == index ? .isSelected : [])
     }
 
     private func preview(_ image: UIImage?, font: UIFont) -> some View {
@@ -256,48 +220,6 @@ struct LetteringView: View {
             }
         }
         .background(Color(.systemGray5))
-    }
-
-    private var fontWheel: some View {
-        let fonts = matchingFonts
-        let initials = Array(Set(fonts.map(\.initial))).sorted()
-        let letter = Binding(
-            get: { fonts.first { $0.id == targetFont.wrappedValue }?.initial ?? initials.first ?? "#" },
-            set: { initial in
-                if let first = fonts.first(where: { $0.initial == initial }) { targetFont.wrappedValue = first.id }
-            }
-        )
-        return VStack(alignment: .leading, spacing: 4) {
-            Picker("Font category", selection: $category) {
-                ForEach(LetteringFont.categories, id: \.self) { Text($0).tag($0) }
-            }
-            TextField("Search fonts", text: $search)
-            if fonts.isEmpty {
-                Text("No matching fonts").foregroundStyle(.secondary)
-            } else {
-                HStack(spacing: 0) {
-                    Picker("Initial", selection: letter) {
-                        ForEach(initials, id: \.self) { Text($0).tag($0) }
-                    }
-                    .pickerStyle(.wheel)
-                    .frame(width: 50)
-                    .clipped()
-                    Picker("Font", selection: targetFont) {
-                        ForEach(fonts) { font in
-                            Text(font.name)
-                                .font(.custom(font.postScript, size: 20))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.5)
-                                .tag(font.id)
-                        }
-                    }
-                    .pickerStyle(.wheel)
-                    .frame(maxWidth: .infinity)
-                    .clipped()
-                }
-                .frame(height: 150)
-            }
-        }
     }
 
     private var styleControls: some View {
