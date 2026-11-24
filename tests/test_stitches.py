@@ -119,12 +119,11 @@ def test_fill_underlay():
     under = dz.convert(square(), settings(width_mm=30, height_mm=30, fill_type="tatami", underlay=True))
     seg = segments(under.pattern)
     L = lengths(seg)
-    ang = np.degrees(np.arctan2(-(seg[:, 3] - seg[:, 1]), seg[:, 2] - seg[:, 0])) % 180
-    cross = seg[(np.abs(ang - 45) < 2) & (L > 1.0)]  # underlay rows at 45 degrees to the 0-degree top fill
-    rows = np.round((cross[:, 1] - cross[:, 0]) / math.sqrt(2) * 2, 0) if len(cross) else np.array([])
-    spacing = float(np.median(np.diff(np.unique(np.round((cross[:, 0] + cross[:, 1]) / math.sqrt(2), 1))))) if len(cross) > 2 else 0
-    check("fill underlay: 45-degree rows 1.2 mm apart (Brother)", len(cross) > 20 and abs(spacing - 1.2) < 0.15,
-          f"{len(cross)} underlay stitches, rows {spacing:.2f} mm apart")
+    vertical = seg[(np.abs(seg[:, 2] - seg[:, 0]) < 0.05) & (L > 1.0)]  # rows at 90 degrees to the 0-degree top
+    xs = np.unique(np.round(vertical[:, 0], 1)) if len(vertical) else np.array([])
+    spacing = float(np.median(np.diff(xs))) if len(xs) > 2 else 0
+    check("fill underlay: 90-degree rows ~1.0 mm apart (Brother)", len(vertical) > 20 and abs(spacing - 1.0) < 0.12,
+          f"{len(vertical)} underlay stitches, rows {spacing:.2f} mm apart")
 
 
 # --------------------------------------------------------------------------- satin
@@ -256,6 +255,28 @@ def test_knockdown():
 
 
 # --------------------------------------------------------------------------- whole designs
+
+
+def test_colors_tuck_under():
+    """A color sewn first carries on under the color sewn on top of it (no gap between colors)."""
+    img = shape(lambda d: (d.rectangle((50, 50, 550, 550), fill=(200, 30, 30)),
+                           d.rectangle((250, 250, 350, 350), fill=(30, 30, 200))))
+    r = dz.convert(img, dz.Settings(width_mm=40, height_mm=40, colors=0, underlay=False))
+    blocks, cur = [], []
+    for x, y, c in r.pattern.stitches:
+        c &= 0xFF
+        if c == pyembroidery.COLOR_CHANGE:
+            blocks.append(cur)
+            cur = []
+        elif c == STITCH:
+            cur.append((x / 10, y / 10))
+    blocks.append(cur)
+    red, blue = np.array(blocks[0]), np.array(blocks[1])
+    cx, cy = blue.mean(axis=0)
+    half = (blue[:, 0].max() - blue[:, 0].min()) / 2
+    inside = red[(np.abs(red[:, 0] - cx) < half - 0.5) & (np.abs(red[:, 1] - cy) < half - 0.5)]
+    reach = half - float(np.min(np.maximum(np.abs(inside[:, 0] - cx), np.abs(inside[:, 1] - cy)))) if len(inside) else 0
+    check("base color tucks ~2 mm under the color on top", 1.5 < reach < 2.6, f"red reaches {reach:.2f} mm under the blue")
 
 
 def test_whole_designs():

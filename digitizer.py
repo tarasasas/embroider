@@ -937,9 +937,9 @@ def _tatami(poly, center, s, pen):
                 walk = _resample_closed(np.asarray(part.exterior.coords)[:-1], 2.5)
                 runs.append([tuple(p) for p in walk] + [tuple(walk[0])])
                 pen = walk[0]
-            # rows 1.2 mm apart at 45 degrees to the top fill, 4 mm stitches: measured from
-            # Brother's own designs; a firm base keeps the top stitches from sinking into knits
-            under, pen = _fill_rows(_scan_poly(part, center, angle + 45, 1.2), 1.2, 4.0, 1.0,
+            # rows about 1 mm apart at 90 degrees to the top fill, ~3 mm stitches: measured from
+            # Brother's own designs (tools/analyze_pes.py); a firm base keeps top stitches from sinking
+            under, pen = _fill_rows(_scan_poly(part, center, angle + 90, 1.0), 1.0, 3.0, 1.0,
                                     4 * s.min_area_mm2, pen)
             runs += under
     top, pen = _fill_rows(_scan_poly(poly, center, angle, s.row_spacing_mm), s.row_spacing_mm,
@@ -1348,11 +1348,9 @@ def digitize(labels, palette, s: Settings, groups=None):
 
     satin_width = {"auto": s.satin_max_mm, "satin": 12.0, "tatami": 0.0}[s.fill_type]
     pen, blocks, all_polys = None, [], []
+    shapes = [_mask_polygons(labels == ci, s.min_area_mm2) if (labels == ci).any() else [] for ci in range(len(palette))]
     for ci, rgb in enumerate(palette):
-        mask = labels == ci
-        if not mask.any():
-            continue
-        polys = _mask_polygons(mask, s.min_area_mm2)
+        polys = shapes[ci]
         if not polys:
             continue
         all_polys += polys
@@ -1364,11 +1362,17 @@ def digitize(labels, palette, s: Settings, groups=None):
         wide, narrow = _split_narrow(polys, satin_width, s.min_area_mm2)
         # grow wide areas by the pull compensation: stitching pulls the fabric in, and the growth
         # also overlaps neighbouring colors slightly so no fabric shows between them
-        # ... and 0.4 mm more where they meet this color's satin columns, so the two overlap
-        # instead of just touching (on stretchy fabric touching pieces pull apart and show a gap)
+        # ... and 1.6 mm more where they meet this color's satin columns (Brother overlaps ~2 mm), so the two overlap instead of
+        # just touching (on stretchy fabric touching pieces pull apart and show a gap)
         same_color = unary_union(polys).buffer(s.pull_comp_mm)
-        wide = [w for w in _polygons_of(unary_union([w.buffer(s.pull_comp_mm + 0.4) for w in wide])
-                                        .intersection(same_color)) if w.area >= s.min_area_mm2]
+        wide_area = unary_union([w.buffer(s.pull_comp_mm + 1.6) for w in wide]).intersection(same_color)
+        # Like Brother's own designs, a color doesn't stop at the edge of a color sewn later on top of
+        # it: it carries on ~2 mm underneath, so the two overlap and no fabric can show between them
+        later = [q for k in range(ci + 1, len(shapes)) for q in shapes[k]]
+        if later and wide:
+            tuck = unary_union(polys).buffer(2.0).intersection(unary_union(later).buffer(-0.3))
+            wide_area = unary_union([wide_area, tuck])
+        wide = [w for w in _polygons_of(wide_area) if w.area >= s.min_area_mm2]
 
         runs = []
         todo = list(wide)
