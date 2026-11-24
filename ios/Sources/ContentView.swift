@@ -311,7 +311,7 @@ struct ContentView: View {
         settings.underlay = true
         settings.cleanup = 1
         settings.brotherColors = true
-        settings.trimMM = 3
+        settings.trimMM = 1
     }
 
     // MARK: - Size

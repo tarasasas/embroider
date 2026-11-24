@@ -18,7 +18,7 @@ struct Settings {
     var fillAngle = 45.0
     var pullCompMM = 0.15
     var underlay = true
-    var trimMM = 3.0             // jumps longer than this get a trim
+    var trimMM = 1.0             // jumps longer than this get a trim
     var minAreaMM2 = 1.0         // smaller regions are skipped
 }
 

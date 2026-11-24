@@ -67,9 +67,12 @@ python digitizer.py --help
 
 ## How it works
 
-`digitizer.py` scales the image to 0.2 mm per pixel. It reduces the image to N colors with k-means, then fills each color region with
-**tatami** stitches: parallel rows at the fill angle, sewn back and forth, with staggered needle points so no lines
-show. Underlay rows go at 90 degrees under the fill. Stitches, jumps, trims and color changes are written with
+`digitizer.py` scales the image to 0.15 mm per pixel and reduces it to N colors with k-means in
+CIELAB (so colors are grouped the way the eye sees them). Each color is traced into smooth vector
+shapes. Narrow strokes (up to 6.5 mm wide) become **satin columns** that follow the stroke's centre
+line, split at sharp corners so the stitches don't fan out. Wider areas get **tatami** fill: an edge
+walk and a cross-hatch underlay first, then rows with staggered needle points; long shapes are sewn
+along their length. Fills are grown by the pull compensation so neighbouring colors overlap slightly
+and no fabric shows between them. Every jump longer than 1 mm is trimmed so no loose threads are left.
+Stitches, jumps, trims and color changes are written with
 [pyembroidery](https://github.com/EmbroidePy/pyembroidery), which also adds tie-in/tie-off lock stitches.
-
-In "auto" fill mode, narrow shapes become satin columns and wide areas get tatami fill. The iPhone version only does tatami fill.

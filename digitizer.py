@@ -5,11 +5,12 @@ Brother .PES file (or DST / JEF / EXP / VP3 for other machines).
 
 Pipeline:
   1. scale the image to the requested size in millimetres
-  2. reduce it to N thread colors (k-means), clean up specks, drop background
-  3. stitch every color: tatami fill for large areas, satin for narrow shapes,
-     optional running / triple / satin edges
-  4. optional outline around the whole design
-  5. assemble stitches, jumps, trims and color changes with pyembroidery
+  2. reduce it to N thread colors (k-means in CIELAB), clean up specks, drop background
+  3. trace every color into smooth vector shapes (shapely)
+  4. wide shapes get tatami fill (edge-walk + cross underlay, rows along the shape);
+     narrow strokes become satin columns that follow their centre line
+  5. optional running / triple / satin edges and an outline around the whole design
+  6. assemble stitches, jumps, trims and color changes with pyembroidery
 
 Command line:
   python digitizer.py logo.png logo.pes --width 90 --height 90 --colors 4
@@ -26,13 +27,16 @@ from functools import lru_cache
 from types import SimpleNamespace
 
 import numpy as np
+import shapely
+from scipy.spatial import Voronoi, cKDTree
+from shapely.geometry import Point, Polygon
+from shapely.ops import unary_union
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from pyembroidery import COLOR_CHANGE, END, JUMP, STITCH, TRIM, EmbPattern, EmbThread
 
-PX_MM = 0.2  # working resolution: millimetres per pixel
+PX_MM = 0.15  # working resolution: millimetres per pixel
 UNITS_PER_MM = 10  # pyembroidery coordinates are 0.1 mm
 MIN_STITCH_MM = 0.4  # shorter stitches just knot the thread
-SATIN_SPLIT_MM = 7.0  # satin stitches longer than this are split so they don't snag
 
 # Embroidery field sizes of common Brother hoops, in mm.
 HOOPS = {
@@ -48,7 +52,7 @@ HOOPS = {
 FABRICS = {
     "Woven cotton": ({"row_spacing_mm": 0.3, "satin_spacing_mm": 0.4, "pull_comp_mm": 0.15, "underlay": True},
                      "Medium tear-away stabilizer."),
-    "T-shirt / knit": ({"row_spacing_mm": 0.4, "satin_spacing_mm": 0.45, "pull_comp_mm": 0.25, "underlay": True},
+    "T-shirt / knit": ({"row_spacing_mm": 0.4, "satin_spacing_mm": 0.4, "pull_comp_mm": 0.25, "underlay": True},
                        "Cut-away stabilizer. Knits stretch, so density is kept light."),
     "Denim / canvas": ({"row_spacing_mm": 0.3, "satin_spacing_mm": 0.4, "pull_comp_mm": 0.1, "underlay": True},
                        "Tear-away stabilizer and a size 90/14 needle."),
@@ -76,14 +80,15 @@ class Settings:
     color_edits: dict = field(default_factory=dict)  # {cluster rgb: new rgb, or None to skip it}
 
     fill_type: str = "auto"  # "auto" = satin for narrow shapes, tatami for the rest
-    satin_max_mm: float = 5.0  # "auto": shapes narrower than this become satin
+    satin_max_mm: float = 6.5  # "auto": shapes narrower than this become satin
     satin_spacing_mm: float = 0.4
     row_spacing_mm: float = 0.3  # tatami density; smaller = denser
     stitch_length_mm: float = 3.5
     fill_angle: float = 45.0
+    auto_angle: bool = True  # long shapes are sewn along their length; others use fill_angle
     pull_comp_mm: float = 0.15  # widens rows to offset fabric pull-in
     underlay: bool = True
-    trim_mm: float = 3.0  # jumps longer than this get a trim
+    trim_mm: float = 1.0  # jumps longer than this get a trim (loose threads show on the fabric)
     min_area_mm2: float = 1.0  # smaller regions are skipped
 
     edge: str = "none"  # finish on the edges of every color: none / running / triple / satin
@@ -190,6 +195,17 @@ def hex_color(rgb):
     return "#%02x%02x%02x" % tuple(rgb)
 
 
+def _rgb_to_lab(rgb):
+    """sRGB (N, 3) -> CIELAB, so k-means groups colors the way the eye does."""
+    c = np.asarray(rgb, np.float32) / 255
+    lin = np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+    m = np.array([[0.4124564, 0.3575761, 0.1804375], [0.2126729, 0.7151522, 0.0721750],
+                  [0.0193339, 0.1191920, 0.9503041]], np.float32)
+    xyz = lin @ m.T / np.array([0.95047, 1.0, 1.08883], np.float32)
+    f = np.where(xyz > 0.008856, np.cbrt(xyz), 7.787 * xyz + 16 / 116)
+    return np.stack([116 * f[:, 1] - 16, 500 * (f[:, 0] - f[:, 1]), 200 * (f[:, 1] - f[:, 2])], axis=1).astype(np.float32)
+
+
 def _nearest_center(pixels, centers):
     out = np.empty(len(pixels), np.int16)
     for i in range(0, len(pixels), 250_000):
@@ -285,9 +301,14 @@ def reduce_colors(img: Image.Image, s: Settings):
     for shift, axis in ((1, 0), (-1, 0), (1, 1), (-1, 1)):
         flat &= np.abs(a - np.roll(a, shift, axis)).max(axis=2) <= 30
     fit = rgb[flat] if flat.sum() >= 0.2 * opaque.sum() else rgb[opaque]  # photos have few flat pixels
-    centers = _kmeans(fit, s.colors + extra_bg)
+    fit_lab = _rgb_to_lab(fit)
+    centers_lab = _kmeans(fit_lab, s.colors + extra_bg)
+    fit_labels = _nearest_center(fit_lab, centers_lab)
+    # thread colors are the plain average of each cluster's flat pixels
+    centers = [fit[fit_labels == i].mean(axis=0) if np.any(fit_labels == i) else (128, 128, 128)
+               for i in range(len(centers_lab))]
     labels = np.full(opaque.shape, -1, np.int16)
-    labels[opaque] = _nearest_center(rgb[opaque], centers)
+    labels[opaque] = _nearest_center(_rgb_to_lab(rgb[opaque]), centers_lab)
 
     if s.cleanup > 0:
         img_labels = Image.fromarray((labels + 1).astype(np.uint8), "L")
@@ -320,83 +341,10 @@ def color_preview(labels, palette, background=(255, 255, 255)) -> Image.Image:
 
 
 # --------------------------------------------------------------------------- shapes
-
-
-def _box_filter(mask, radius, erode):
-    """Erodes (shrinks) or dilates (grows) a boolean mask with a square of `radius` pixels."""
-    if radius <= 0:
-        return mask
-    k = 2 * radius + 1
-    out = mask
-    for axis in (1, 0):
-        pad = [(0, 0), (0, 0)]
-        pad[axis] = (radius + 1, radius)
-        c = np.cumsum(np.pad(out.astype(np.int32), pad), axis=axis)
-        window = c[:, k:] - c[:, :-k] if axis == 1 else c[k:, :] - c[:-k, :]
-        out = window == k if erode else window > 0
-    return out
-
-
-def _erode(mask, radius):
-    return _box_filter(mask, radius, erode=True)
-
-
-def _dilate(mask, radius):
-    return _box_filter(mask, radius, erode=False)
-
-
-def _components(mask):
-    """Labels 4-connected regions. Returns (label image with 0 = empty, [(y0, x0, y1, x1), ...])."""
-    H, W = mask.shape
-    labels = np.zeros((H, W), np.int32)
-    edges = np.diff(np.pad(mask, ((0, 0), (1, 1))).astype(np.int8), axis=1)
-    rows, starts = np.nonzero(edges == 1)
-    _, ends = np.nonzero(edges == -1)  # exclusive
-    n = len(rows)
-    if n == 0:
-        return labels, []
-
-    parent = list(range(n))
-
-    def find(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    R, S, E = rows.tolist(), starts.tolist(), ends.tolist()
-    ptr = np.searchsorted(rows, np.arange(H + 2)).tolist()
-    for r in range(H - 1):  # union runs that overlap on the next row
-        i, i_end, j, j_end = ptr[r], ptr[r + 1], ptr[r + 1], ptr[r + 2]
-        while i < i_end and j < j_end:
-            if S[i] < E[j] and S[j] < E[i]:
-                a, b = find(i), find(j)
-                if a != b:
-                    parent[b] = a
-            if E[i] < E[j]:
-                i += 1
-            else:
-                j += 1
-
-    ids, boxes = {}, []
-    for k in range(n):
-        root = find(k)
-        if root not in ids:
-            ids[root] = len(ids) + 1
-            boxes.append([R[k], S[k], R[k] + 1, E[k]])
-        c = ids[root]
-        box = boxes[c - 1]
-        box[0], box[1] = min(box[0], R[k]), min(box[1], S[k])
-        box[2], box[3] = max(box[2], R[k] + 1), max(box[3], E[k])
-        labels[R[k], S[k] : E[k]] = c
-    return labels, [tuple(b) for b in boxes]
-
-
-def _fill_holes(mask):
-    background, _ = _components(~mask)
-    touching = np.unique(np.concatenate([background[0], background[-1], background[:, 0], background[:, -1]]))
-    holes = (background > 0) & ~np.isin(background, touching)
-    return mask | holes
+#
+# From here on geometry is vector: every color region becomes smooth polygons in millimetres.
+# Fills and satin columns are computed on those polygons, so edges are smooth instead of
+# following the pixel grid.
 
 
 # marching-squares segments per cell case (corner bits: top-left 8, top-right 4,
@@ -409,7 +357,6 @@ _MS = {
 
 
 def _contours(mask):
-    """Closed boundary loops (outer edges and holes) of a mask, as (n, 2) arrays of pixel coords."""
     m = np.pad(mask, 1).astype(np.uint8)
     case = m[:-1, :-1] * 8 + m[:-1, 1:] * 4 + m[1:, 1:] * 2 + m[1:, :-1]
     ys, xs = np.nonzero((case > 0) & (case < 15))
@@ -438,68 +385,308 @@ def _contours(mask):
     return loops
 
 
+def _smooth_ring(pts, passes=2):
+    for _ in range(passes):
+        pts = sum(np.roll(pts, shift, axis=0) for shift in range(-2, 3)) / 5
+    return pts
+
+
+def _polygons_of(geom):
+    """Flattens any shapely geometry into a list of Polygons."""
+    if geom is None or geom.is_empty:
+        return []
+    if geom.geom_type == "Polygon":
+        return [geom]
+    return [p for part in getattr(geom, "geoms", []) for p in _polygons_of(part)]
+
+
+def _mask_polygons(mask, min_area_mm2):
+    """Smooth polygons (in mm) for a boolean mask. Holes become interior rings."""
+    loops, raw, smooth = [], [], []
+    for loop in _contours(mask):
+        if len(loop) < 8:
+            continue
+        poly = Polygon(_smooth_ring(loop * PX_MM))
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if poly.is_empty:
+            continue
+        loops.append(loop)
+        raw.append(Polygon(loop * PX_MM))
+        smooth.append(poly)
+    if not smooth:
+        return []
+
+    # Nesting depth of each loop = how many other loops contain it. Even depth is an outer edge,
+    # odd depth is a hole. (Loops never cross, so one point per loop is enough to test.)
+    points = shapely.points(np.array([l[0] * PX_MM for l in loops]))
+    pairs = shapely.STRtree(raw).query(points, predicate="within")
+    depth = np.bincount(pairs[0], minlength=len(loops)) if pairs.size else np.zeros(len(loops), int)
+    levels = {}
+    for d, poly in zip(depth.tolist(), smooth):
+        levels.setdefault(d, []).append(poly)
+    parts = []
+    for d in sorted(levels):
+        if d % 2 == 0:  # an outer level minus the holes directly inside it
+            outer = unary_union(levels[d])
+            holes = levels.get(d + 1)
+            parts.append(outer.difference(unary_union(holes)) if holes else outer)
+    geom = unary_union(parts)
+    polys = []
+    for p in _polygons_of(geom):
+        p = p.simplify(0.02)
+        if p.area >= min_area_mm2:
+            polys.append(p)
+    return polys
+
+
+def _elongation(poly):
+    """(long side, short side, angle of the long side in the row convention) of the oriented bounding box."""
+    rect = poly.minimum_rotated_rectangle
+    if rect.geom_type != "Polygon":
+        return 0.0, 0.0, 0.0
+    c = np.asarray(rect.exterior.coords)
+    e0, e1 = c[1] - c[0], c[2] - c[1]
+    l0, l1 = float(np.hypot(*e0)), float(np.hypot(*e1))
+    e, long_side, short_side = (e0, l0, l1) if l0 >= l1 else (e1, l1, l0)
+    return long_side, short_side, math.degrees(math.atan2(-e[1], e[0])) % 180
+
+
+def _split_narrow(polys, width_mm, min_area):
+    """Splits polygons into wide areas (tatami) and narrow strokes (satin columns).
+
+    A part is narrow if it vanishes when the polygon is shrunk by half the satin width.
+    """
+    if width_mm <= 0:
+        return polys, []
+    wide, narrow = [], []
+    for p in polys:
+        core = p.buffer(-width_mm / 2).buffer(width_mm / 2)
+        if core.is_empty:
+            narrow.append(p)
+            continue
+        kept = []
+        near_core = core.buffer(0.05)
+        for part in _polygons_of(p.difference(core)):
+            long_side, short_side, _ = _elongation(part)
+            if part.area < max(min_area, 1.5) or long_side < max(2.5, 2.0 * short_side):
+                continue
+            # a real stroke touches the wide area only at its end; a thin skin hugging the
+            # wide area's edge (left over where the shrink-and-grow rounds a corner) touches all along
+            shared = part.boundary.intersection(near_core).length
+            if shared < 0.6 * long_side:
+                kept.append(part)
+        rest = p.difference(unary_union(kept)) if kept else p
+        wide += [w for w in _polygons_of(rest) if w.area >= min_area]
+        narrow += kept
+    return wide, narrow
+
+
+# --------------------------------------------------------------------------- paths
+
+
+def _resample_closed(loop, step):
+    closed = np.vstack([loop, loop[:1]])
+    lengths = np.hypot(*np.diff(closed, axis=0).T)
+    cum = np.concatenate([[0], np.cumsum(lengths)])
+    if cum[-1] <= 0:
+        return loop[:1]
+    n = max(4, int(round(cum[-1] / step)))
+    at = np.linspace(0, cum[-1], n, endpoint=False)
+    return np.stack([np.interp(at, cum, closed[:, 0]), np.interp(at, cum, closed[:, 1])], axis=1)
+
+
+def _resample_open(path, step, keep_end=True):
+    path = np.asarray(path, float)
+    lengths = np.hypot(*np.diff(path, axis=0).T)
+    cum = np.concatenate([[0], np.cumsum(lengths)])
+    if cum[-1] <= 0:
+        return path[:1]
+    n = max(2, int(round(cum[-1] / step)) + 1)
+    at = np.linspace(0, cum[-1], n)
+    return np.stack([np.interp(at, cum, path[:, 0]), np.interp(at, cum, path[:, 1])], axis=1)
+
+
+def _smooth_path(pts, closed, passes=3):
+    pts = np.asarray(pts, float)
+    for _ in range(passes):
+        if closed:
+            pts = (np.roll(pts, 1, axis=0) + 2 * pts + np.roll(pts, -1, axis=0)) / 4
+        elif len(pts) > 2:
+            inner = (pts[:-2] + 2 * pts[1:-1] + pts[2:]) / 4
+            pts = np.vstack([pts[:1], inner, pts[-1:]])  # the end points stay put
+    return pts
+
+
+def _skeleton_branches(poly, step=0.25):
+    """Centre lines of a narrow polygon, from the Voronoi diagram of its boundary.
+
+    Returns a list of (points, closed, leaf_at_start, leaf_at_end, max_radius): one per branch of
+    the skeleton. Short spurs (caused by corners and ragged edges) are pruned away.
+    """
+    rings = [poly.exterior] + list(poly.interiors)
+    parts, ring_id, ring_idx, ring_n = [], [], [], []
+    for k, ring in enumerate(rings):
+        n = max(12, int(ring.length / step))
+        at = np.linspace(0, ring.length, n, endpoint=False)
+        parts.append(shapely.get_coordinates(shapely.line_interpolate_point(ring, at)))
+        ring_id += [k] * n
+        ring_idx += list(range(n))
+        ring_n += [n] * n
+    P = np.vstack(parts)
+    ring_id, ring_idx, ring_n = np.array(ring_id), np.array(ring_idx), np.array(ring_n)
+    try:
+        vor = Voronoi(P)
+    except Exception:
+        return []
+    V = vor.vertices
+    inside = shapely.contains_xy(poly, V[:, 0], V[:, 1])
+    radius = cKDTree(P).query(V)[0]
+
+    adj = {}
+    for (a, b), (p, q) in zip(vor.ridge_vertices, vor.ridge_points):
+        if a < 0 or b < 0 or not (inside[a] and inside[b]):
+            continue
+        if ring_id[p] == ring_id[q]:  # ridges between neighbouring boundary points are spikes
+            gap = abs(ring_idx[p] - ring_idx[q])
+            if min(gap, ring_n[p] - gap) <= 2:
+                continue
+        adj.setdefault(a, set()).add(b)
+        adj.setdefault(b, set()).add(a)
+
+    def branches(adj):
+        deg = {n: len(a) for n, a in adj.items()}
+        used, paths = set(), []
+        for n in [n for n in adj if deg[n] != 2]:
+            for m in adj[n]:
+                if (n, m) in used:
+                    continue
+                path = [n, m]
+                used.update(((n, m), (m, n)))
+                prev, cur = n, m
+                while deg[cur] == 2:
+                    nxt = next(x for x in adj[cur] if x != prev)
+                    used.update(((cur, nxt), (nxt, cur)))
+                    path.append(nxt)
+                    prev, cur = cur, nxt
+                paths.append(path)
+        covered = {n for path in paths for n in path}
+        for n in adj:  # loops with no branch points at all
+            if n in covered or deg[n] != 2:
+                continue
+            path, prev, cur = [n], None, n
+            while True:
+                nxt = next(x for x in adj[cur] if x != prev) if prev is not None else next(iter(adj[cur]))
+                if nxt == n:
+                    break
+                path.append(nxt)
+                covered.add(nxt)
+                prev, cur = cur, nxt
+            covered.add(n)
+            paths.append(path + [n])
+        return paths
+
+    def length_of(path):
+        return float(np.hypot(*np.diff(V[path], axis=0).T).sum())
+
+    for _ in range(6):  # prune spurs, repeating because removing one can expose another
+        removed = False
+        deg = {n: len(a) for n, a in adj.items()}
+        for path in branches(adj):
+            leaf_a, leaf_b = deg.get(path[0]) == 1, deg.get(path[-1]) == 1
+            if leaf_a == leaf_b:
+                continue
+            width = 2 * max(radius[n] for n in path)
+            if length_of(path) < max(1.0, width):
+                for n in (path[:-1] if leaf_a else path[1:]):
+                    for m in adj.pop(n, ()):
+                        if m in adj:
+                            adj[m].discard(n)
+                removed = True
+        adj = {n: a for n, a in adj.items() if a}
+        if not removed:
+            break
+
+    deg = {n: len(a) for n, a in adj.items()}
+    out = []
+    for path in branches(adj):
+        if length_of(path) < 0.8:
+            continue
+        closed = path[0] == path[-1] and len(path) > 3
+        out.append((V[path[:-1] if closed else path], closed, deg.get(path[0]) == 1, deg.get(path[-1]) == 1,
+                    float(max(radius[n] for n in path))))
+    return out
+
+
 # --------------------------------------------------------------------------- stitches
 
 
-def _scan(mask, box, center, angle, spacing_px, step=0.5):
-    """Intersects parallel rows at `angle` degrees with a mask.
+def _scan_poly(poly, center, angle, spacing):
+    """Intersects parallel rows at `angle` degrees with a polygon (holes included).
 
-    `mask` is a crop whose top-left corner sits at `box` (x, y) in the full image; rows lie on
-    a lattice anchored at `center` so neighbouring areas line up. Returns None if empty.
+    Rows lie on a lattice anchored at `center`, so neighbouring shapes line up. Row ends are exact
+    (sub-pixel), which keeps the fill edge smooth.
     """
-    ys, xs = np.nonzero(mask)
-    if xs.size == 0:
-        return None
-    H, W = mask.shape
-    bx, by = box
-    cx, cy = center
     a = math.radians(angle)
     ux, uy = math.cos(a), -math.sin(a)  # along a row (image y axis points down)
     nx, ny = -uy, ux  # across rows
+    cx, cy = center
 
-    px, py = xs + bx + 0.5 - cx, ys + by + 0.5 - cy
-    proj_n, proj_t = px * nx + py * ny, px * ux + py * uy
-    first_row = math.floor((proj_n.min() - 1) / spacing_px)
-    last_row = math.ceil((proj_n.max() + 1) / spacing_px)
-    grid_rows = np.arange(first_row, last_row + 1)
-    ds = grid_rows * spacing_px
-    ts = np.arange(proj_t.min() - 1, proj_t.max() + 1, step)
+    edges = []
+    for ring in [poly.exterior, *poly.interiors]:
+        c = np.asarray(ring.coords)
+        px, py = c[:, 0] - cx, c[:, 1] - cy
+        t, d = px * ux + py * uy, px * nx + py * ny
+        edges.append(np.stack([t[:-1], d[:-1], t[1:], d[1:]], axis=1))
+    E = np.vstack(edges)
+    E = E[E[:, 1] != E[:, 3]]
+    if len(E) == 0:
+        return None
+    t0, d0, t1, d1 = E.T
+    lo, hi = np.minimum(d0, d1), np.maximum(d0, d1)
+    first, last = math.floor(lo.min() / spacing), math.ceil(hi.max() / spacing)
+    grid_rows = np.arange(first, last + 1)
+    ds = grid_rows * spacing
 
     seg_r, seg_t0, seg_t1 = [], [], []
-    chunk = max(1, 2_000_000 // len(ts))
-    for i in range(0, len(ds), chunk):
-        d = ds[i : i + chunk, None]
-        X = np.floor(cx + d * nx + ts * ux).astype(np.int64) - bx
-        Y = np.floor(cy + d * ny + ts * uy).astype(np.int64) - by
-        ok = (X >= 0) & (X < W) & (Y >= 0) & (Y < H)
-        inside = np.zeros(X.shape, bool)
-        inside[ok] = mask[Y[ok], X[ok]]
-        edges = np.diff(np.pad(inside, ((0, 0), (1, 1))).astype(np.int8), axis=1)
-        sr, sc = np.nonzero(edges == 1)
-        _, ec = np.nonzero(edges == -1)
-        seg_r.append(sr + i)
-        seg_t0.append(ts[sc] - step / 2)
-        seg_t1.append(ts[ec - 1] + step / 2)
-    return SimpleNamespace(
-        grid_rows=grid_rows, ds=ds, r=np.concatenate(seg_r), t0=np.concatenate(seg_t0),
-        t1=np.concatenate(seg_t1), cx=cx, cy=cy, ux=ux, uy=uy, nx=nx, ny=ny,
-    )
+    for r, d in enumerate(ds):
+        sel = (lo <= d) & (hi > d)  # half-open, so a vertex on a row is counted once
+        if not sel.any():
+            continue
+        ts = np.sort(t0[sel] + (d - d0[sel]) * (t1[sel] - t0[sel]) / (d1[sel] - d0[sel]))
+        if len(ts) % 2:
+            continue
+        for k in range(0, len(ts), 2):
+            if ts[k + 1] - ts[k] > 1e-6:
+                seg_r.append(r)
+                seg_t0.append(ts[k])
+                seg_t1.append(ts[k + 1])
+    if not seg_r:
+        return None
+    return SimpleNamespace(grid_rows=grid_rows, ds=ds, r=np.array(seg_r), t0=np.array(seg_t0),
+                           t1=np.array(seg_t1), cx=cx, cy=cy, ux=ux, uy=uy, nx=nx, ny=ny)
 
 
-def _fill(mask, box, center, angle, spacing_px, stitch_px, pull_px, min_len_px, min_area_px, pen, satin=False):
-    """Fills a mask with parallel rows sewn back and forth.
+def _travel(pts, target, max_len):
+    """Appends evenly spaced stitches from the last point to `target` (exclusive)."""
+    x0, y0 = pts[-1]
+    dist = math.hypot(target[0] - x0, target[1] - y0)
+    pieces = math.ceil(dist / max_len)
+    for i in range(1, pieces):
+        f = i / pieces
+        pts.append((x0 + (target[0] - x0) * f, y0 + (target[1] - y0) * f))
 
-    Tatami: needle points every `stitch_px` along each row, staggered between rows.
-    Satin: one needle point at each end of a row, so stitches zigzag across the shape
-    (rows longer than `stitch_px` are split).
 
-    Returns (runs, pen): each run is a list of (x, y) pixel points sewn continuously;
-    consecutive runs are joined with a jump. `pen` is the current needle position.
+def _fill_rows(rows, spacing, stitch, min_len, min_area, pen):
+    """Sews prepared rows back and forth (tatami): needle points every `stitch` along each row,
+    staggered between rows.
+
+    Returns (runs, pen): each run is a list of (x, y) mm points sewn continuously; consecutive
+    runs are joined with a jump. `pen` is the current needle position.
     """
-    rows = _scan(mask, box, center, angle, spacing_px)
     if rows is None:
         return [], pen
-    keep = (rows.t1 - rows.t0) >= min_len_px
+    keep = (rows.t1 - rows.t0) >= min_len
     seg_r, seg_t0, seg_t1 = rows.r[keep], rows.t0[keep], rows.t1[keep]
     n = len(seg_r)
     if n == 0:
@@ -521,7 +708,6 @@ def _fill(mask, box, center, angle, spacing_px, stitch_px, pull_px, min_len_px, 
     R, T0, T1 = seg_r.tolist(), seg_t0.tolist(), seg_t1.tolist()
     visited = np.zeros(n, bool)
     left = n
-    min_px = MIN_STITCH_MM / PX_MM
 
     runs = []
     while left:
@@ -563,122 +749,214 @@ def _fill(mask, box, center, angle, spacing_px, stitch_px, pull_px, min_len_px, 
 
         last, last_fwd = chain[-1]
         pen = end1[last] if last_fwd else end0[last]
-        if sum(T1[c] - T0[c] for c, _ in chain) * spacing_px < min_area_px:
+        if sum(T1[c] - T0[c] for c, _ in chain) * spacing < min_area:
             continue
 
         pts = []
         for idx, forward in chain:
-            r, t0, t1 = R[idx], T0[idx] - pull_px, T1[idx] + pull_px
-            phase = (grid_rows[r] % 3) * stitch_px / 3.0  # brick offset hides row lines
-            k0 = math.ceil((t0 + min_px - phase) / stitch_px)
-            k1 = math.floor((t1 - min_px - phase) / stitch_px)
-            inner = [phase + k * stitch_px for k in range(k0, k1 + 1)]
+            r, t0, t1 = R[idx], T0[idx], T1[idx]
+            phase = (grid_rows[r] % 3) * stitch / 3.0  # brick offset hides row lines
+            k0 = math.ceil((t0 + MIN_STITCH_MM - phase) / stitch)
+            k1 = math.floor((t1 - MIN_STITCH_MM - phase) / stitch)
+            inner = [phase + k * stitch for k in range(k0, k1 + 1)]
             start, end = (t0, t1) if forward else (t1, t0)
             if not forward:
                 inner.reverse()
-            if satin and pts:
-                row_ts = inner + [end]  # the needle is already at this row's start side
-            else:
-                row_ts = [start] + inner + [end]
-            row_pts = [point(r, t) for t in row_ts]
+            row_pts = [point(r, t) for t in [start] + inner + [end]]
             if pts:
-                _travel(pts, row_pts[0], stitch_px)
+                _travel(pts, row_pts[0], stitch)
             pts.extend(row_pts)
         runs.append(pts)
     return runs, pen
 
 
-def _travel(pts, target, max_len):
-    """Appends evenly spaced stitches from the last point to `target` (exclusive)."""
-    x0, y0 = pts[-1]
-    dist = math.hypot(target[0] - x0, target[1] - y0)
-    pieces = math.ceil(dist / max_len)
-    for i in range(1, pieces):
-        f = i / pieces
-        pts.append((x0 + (target[0] - x0) * f, y0 + (target[1] - y0) * f))
-
-
-def _satin_angle(mask, box, center):
-    """Row angle that crosses a shape the short way (smallest typical row length)."""
-    best_len, best_angle = np.inf, 0
-    for angle in range(0, 180, 15):
-        rows = _scan(mask, box, center, angle, 1.0, step=1.0)
-        if rows is None or len(rows.r) == 0:
-            continue
-        length = np.percentile(rows.t1 - rows.t0, 90)
-        if length < best_len:
-            best_len, best_angle = length, angle
-    return best_angle
-
-
-def _color_runs(mask, center, s: Settings, pen):
-    """Underlay + tatami for wide areas and satin for narrow shapes of one color."""
-    px = 1 / PX_MM
-    min_area = s.min_area_mm2 * px * px
-    inset = max(1, round(0.4 * px))
-    runs, wide, narrow = [], mask, []
-
-    if s.fill_type in ("auto", "satin"):
-        comps, boxes = _components(mask)
-        if s.fill_type == "satin":
-            narrow_ids = list(range(1, len(boxes) + 1))
-        else:  # a shape is narrow if shrinking it by half the satin width wipes it out
-            core = _erode(mask, max(1, round(s.satin_max_mm * px / 2)))
-            thick = set(np.unique(comps[core]).tolist())
-            narrow_ids = [i for i in range(1, len(boxes) + 1) if i not in thick]
-        if narrow_ids:
-            wide = mask & ~np.isin(comps, narrow_ids)
-            for i in narrow_ids:
-                y0, x0, y1, x1 = boxes[i - 1]
-                narrow.append((comps[y0:y1, x0:x1] == i, (x0, y0)))
-
-    if wide.any():
-        if s.underlay:  # sparse perpendicular rows, inset from the edge, stabilise the fabric
-            under, pen = _fill(_erode(wide, inset), (0, 0), center, s.fill_angle + 90, 2.0 * px, 3.0 * px,
-                               0, 1.0 * px, 4 * min_area, pen)
+def _tatami(poly, center, s, pen):
+    """Underlay (edge walk + sparse perpendicular rows) and the top fill of one polygon."""
+    angle = s.fill_angle
+    if s.auto_angle:  # elongated shapes are sewn along their length; blobs use the chosen angle
+        long_side, short_side, along = _elongation(poly)
+        if short_side > 0 and long_side >= 1.8 * short_side:
+            angle = along
+    runs = []
+    if s.underlay:
+        for part in _polygons_of(poly.buffer(-0.4)):
+            if part.area < 2.0:
+                continue
+            if part.area >= 12.0:  # edge walk: holds the edge down before the rows go on top
+                walk = _resample_closed(np.asarray(part.exterior.coords)[:-1], 2.5)
+                runs.append([tuple(p) for p in walk] + [tuple(walk[0])])
+                pen = walk[0]
+            under, pen = _fill_rows(_scan_poly(part, center, angle + 90, 2.0), 2.0, 3.0, 1.0,
+                                    4 * s.min_area_mm2, pen)
             runs += under
-        top, pen = _fill(wide, (0, 0), center, s.fill_angle, s.row_spacing_mm * px, s.stitch_length_mm * px,
-                         s.pull_comp_mm * px, 0.5 * px, min_area, pen)
-        runs += top
-
-    while narrow:
-        def distance(item):
-            part, (bx, by) = item
-            return 0 if pen is None else math.dist(pen, (bx + part.shape[1] / 2, by + part.shape[0] / 2))
-
-        part, box = narrow.pop(min(range(len(narrow)), key=lambda i: distance(narrow[i])))
-        angle = _satin_angle(part, box, center)
-        if s.underlay:  # runs along the column's length
-            under, pen = _fill(_erode(part, inset), box, center, angle + 90, 1.5 * px, 3.0 * px,
-                               0, 1.0 * px, min_area, pen)
-            runs += under
-        top, pen = _fill(part, box, center, angle, s.satin_spacing_mm * px / 2, SATIN_SPLIT_MM * px,
-                         s.pull_comp_mm * px, 0.3 * px, min_area, pen, satin=True)
-        runs += top
-    return runs, pen
+    top, pen = _fill_rows(_scan_poly(poly, center, angle, s.row_spacing_mm), s.row_spacing_mm,
+                          s.stitch_length_mm, 0.5, s.min_area_mm2, pen)
+    return runs + top, pen
 
 
-def _resample_closed(loop, step):
-    closed = np.vstack([loop, loop[:1]])
-    lengths = np.hypot(*np.diff(closed, axis=0).T)
-    cum = np.concatenate([[0], np.cumsum(lengths)])
-    n = max(4, int(round(cum[-1] / step)))
-    at = np.linspace(0, cum[-1], n, endpoint=False)
-    return np.stack([np.interp(at, cum, closed[:, 0]), np.interp(at, cum, closed[:, 1])], axis=1)
+def _split_at_corners(path, closed, leaf_a, leaf_b, radius, angle=60.0):
+    """Cuts a centre line where it turns sharply, so each straight-ish stroke gets its own column.
 
-
-def _line_runs(loops, kind, width_px, pen, s: Settings):
-    """Sews closed loops as running, triple (bean) or satin lines, nearest loop first."""
-    px = 1 / PX_MM
-    prepared = []
-    for loop in loops:
-        if len(loop) < 8:
+    One column can't turn a tight corner without fanning its stitches. Each cut end is marked as a
+    leaf, so the column runs on past the corner and the neighbouring columns overlap there.
+    """
+    pts = _resample_closed(path, 0.2) if closed else _resample_open(path, 0.2)
+    n = len(pts)
+    if n < 12:
+        return [(path, closed, leaf_a, leaf_b, radius)]
+    pts = _smooth_path(pts, closed, passes=4)
+    w = 3  # points are 0.2 mm apart, so this looks 0.6 mm either side
+    score = np.zeros(n)
+    for i in range(n):
+        if not closed and (i < w or i >= n - w):
             continue
-        for _ in range(2):  # smooth out the pixel staircase
-            loop = sum(np.roll(loop, shift, axis=0) for shift in range(-2, 3)) / 5
-        if np.hypot(*(np.roll(loop, -1, axis=0) - loop).T).sum() >= 3 * px:
-            prepared.append(loop)
+        v1, v2 = pts[i] - pts[(i - w) % n], pts[(i + w) % n] - pts[i]
+        denom = float(np.hypot(*v1) * np.hypot(*v2))
+        if denom > 0:
+            score[i] = math.degrees(math.acos(max(-1.0, min(1.0, float(v1 @ v2) / denom))))
+    corners = [i for i in range(n) if score[i] >= angle
+               and score[i] == score[max(0, i - 2 * w):i + 2 * w + 1].max()
+               and (closed or w * 2 <= i < n - w * 2)]
+    # keep one corner per cluster
+    corners = [c for k, c in enumerate(corners) if k == 0 or c - corners[k - 1] > 2 * w]
+    if not corners:
+        return [(path, closed, leaf_a, leaf_b, radius)]
+    if closed:
+        pts = np.roll(pts, -corners[0], axis=0)
+        corners = [c - corners[0] for c in corners]
+        cuts = corners + [n]
+        pieces = [pts[cuts[k]:cuts[k + 1] + 1] if cuts[k + 1] < n else np.vstack([pts[cuts[k]:], pts[:1]])
+                  for k in range(len(corners))]
+        return [(p, False, True, True, radius) for p in pieces if len(p) >= 4]
+    cuts = [0] + corners + [n - 1]
+    out = []
+    for k in range(len(cuts) - 1):
+        p = pts[cuts[k]:cuts[k + 1] + 1]
+        if len(p) >= 4:
+            out.append((p, False, True if k > 0 else leaf_a, True if k < len(cuts) - 2 else leaf_b, radius))
+    return out
 
+
+def _satin_runs(poly, s, pen):
+    """Satin columns along the centre lines of a narrow polygon. Returns (runs, pen) or None."""
+    try:
+        branches = _skeleton_branches(poly)
+    except Exception:
+        return None
+    if not branches:
+        return None
+    shapely.prepare(poly)
+    step = max(0.15, s.satin_spacing_mm / 2)
+    runs = []
+    todo = []
+    for path, closed, leaf_a, leaf_b, radius in branches:
+        todo += _split_at_corners(path, closed, leaf_a, leaf_b, radius)
+    while todo:
+        if pen is None:
+            k = 0
+        else:
+            k = min(range(len(todo)), key=lambda i: min(math.dist(pen, todo[i][0][0]), math.dist(pen, todo[i][0][-1])))
+        path, closed, leaf_a, leaf_b, radius = todo.pop(k)
+        if pen is not None and not closed and math.dist(pen, path[-1]) < math.dist(pen, path[0]):
+            path, leaf_a, leaf_b = path[::-1], leaf_b, leaf_a
+        run = _satin_column(poly, path, closed, leaf_a, leaf_b, radius, step, s)
+        if run:
+            runs.append(run)
+            pen = np.array(run[-1])
+    return (runs, pen) if runs else None
+
+
+def _satin_column(poly, path, closed, leaf_a, leaf_b, radius, step, s):
+    pts = _resample_closed(path, 0.2) if closed else _resample_open(path, 0.2)
+    if len(pts) < 3:
+        return None
+    pts = _smooth_path(pts, closed, passes=6)
+
+    if not closed:  # carry the column to the tip: the centre line stops one radius short of the end
+        for at_start, leaf in ((True, leaf_a), (False, leaf_b)):
+            if not leaf:
+                continue
+            tip, nxt = (pts[0], pts[min(4, len(pts) - 1)]) if at_start else (pts[-1], pts[max(-5, -len(pts))])
+            direction = tip - nxt
+            norm = float(np.hypot(*direction))
+            if norm <= 0:
+                continue
+            direction /= norm
+            extra = [tip + direction * d for d in np.arange(0.1, radius * 1.1, 0.1)
+                     if poly.buffer(0.05).contains(Point(*(tip + direction * d)))]
+            if extra:
+                pts = np.vstack([extra[::-1], pts]) if at_start else np.vstack([pts, extra])
+
+    pts = _resample_closed(pts, step) if closed else _resample_open(pts, step)
+    if len(pts) < 3:
+        return None
+    # Local half-width of the stroke: distance to the nearest edge. Near the tips and corners that
+    # distance shrinks (the end edge is close), so take the largest value within a window along the column.
+    local = shapely.distance(shapely.points(pts), poly.boundary)
+
+    # Stitch direction: measured over about one stroke width of centre line, so small wiggles and
+    # the bend where the centre line runs into a corner don't fan the stitches out.
+    n = len(pts)
+    k = max(2, int(round(2 * float(np.median(local)) / step)))
+    if closed:
+        tangent = np.roll(pts, -k, axis=0) - np.roll(pts, k, axis=0)
+    else:
+        idx = np.arange(n)
+        tangent = pts[np.minimum(n - 1, idx + k)] - pts[np.maximum(0, idx - k)]
+    tangent /= np.maximum(np.hypot(tangent[:, 0], tangent[:, 1]), 1e-9)[:, None]
+    normal = np.stack([-tangent[:, 1], tangent[:, 0]], axis=1)
+    win = max(1, int(round(1.5 * radius / step)))
+    reach = np.array([local[max(0, i - win):i + win + 1].max() for i in range(len(pts))]) * 1.3 + 0.2
+    # where strokes meet, the "width" balloons; never go much past this column's typical width
+    reach = np.minimum(reach, float(np.median(local)) * 1.35 + 0.2)
+    half = 2 * radius + 1.0  # how far to look for the edges on either side
+    lines = shapely.linestrings(np.stack([pts - normal * half, pts + normal * half], axis=1))
+    cut = shapely.intersection(lines, poly)
+    lo = np.full(len(pts), np.nan)
+    hi = np.full(len(pts), np.nan)
+    for i, geom in enumerate(cut):
+        if geom.is_empty:
+            continue
+        pieces = [geom] if geom.geom_type == "LineString" else [g for g in getattr(geom, "geoms", [])
+                                                                 if g.geom_type == "LineString"]
+        if not pieces:
+            continue
+        piece = min(pieces, key=lambda g: g.distance(Point(*pts[i])))
+        a, b = np.asarray(piece.coords[0]), np.asarray(piece.coords[-1])
+        ta, tb = float((a - pts[i]) @ normal[i]), float((b - pts[i]) @ normal[i])
+        lo[i], hi[i] = max(min(ta, tb), -reach[i]), min(max(ta, tb), reach[i])  # stay within the stroke's own width
+    ok = np.isfinite(lo) & ((hi - lo) > 0.2)
+    if ok.sum() < 3:
+        return None
+    pts, normal, lo, hi = pts[ok], normal[ok], lo[ok], hi[ok]
+    pull = s.pull_comp_mm
+
+    def zigzag(idx, inset, pull_out):
+        out = []
+        for j, i in enumerate(idx):
+            width = hi[i] - lo[i]
+            if width <= 2 * inset + 0.2:
+                out.append(tuple(pts[i] + normal[i] * (hi[i] + lo[i]) / 2))
+            elif j % 2 == 0:
+                out.append(tuple(pts[i] + normal[i] * (lo[i] + inset - pull_out)))
+            else:
+                out.append(tuple(pts[i] + normal[i] * (hi[i] - inset + pull_out)))
+        return out
+
+    n = len(pts)
+    top = zigzag(range(n), 0.0, pull)
+    if not s.underlay:
+        return top
+    every = lambda pitch: list(range(0, n, max(1, round(pitch / step)))) + ([n - 1] if (n - 1) % max(1, round(pitch / step)) else [])
+    center = [tuple(pts[i] + normal[i] * (hi[i] + lo[i]) / 2) for i in every(2.5)]
+    under = zigzag(every(1.4), 0.3, 0.0)[::-1]  # comes back along the column, so no jump is needed
+    return center + under + top
+
+
+def _line_runs(rings, kind, width_mm, pen, s):
+    """Sews closed loops (arrays of mm points) as running, triple (bean) or satin lines, nearest first."""
+    prepared = [np.asarray(r, float) for r in rings if len(r) >= 8 and
+                np.hypot(*(np.roll(r, -1, axis=0) - r).T).sum() >= 3.0]
     runs = []
     while prepared:
         if pen is None:
@@ -690,67 +968,119 @@ def _line_runs(loops, kind, width_px, pen, s: Settings):
         loop = np.roll(prepared.pop(i), -j, axis=0)
 
         if kind == "satin":
-            under = _resample_closed(loop, 2.0 * px)  # center walk underlay
+            under = _resample_closed(loop, 2.0)  # centre walk underlay
             path = [tuple(p) for p in under] + [tuple(under[0])]
-            step = s.satin_spacing_mm * px / 2
+            step = max(0.15, s.satin_spacing_mm / 2)
             c = _resample_closed(loop, step)
             if len(c) % 2:
                 c = c[:-1]
-            k = max(1, round(0.6 * px / step))
+            k = max(1, round(0.6 / step))
             tangent = np.roll(c, -k, axis=0) - np.roll(c, k, axis=0)
             tangent /= np.maximum(np.hypot(tangent[:, 0], tangent[:, 1]), 1e-9)[:, None]
             normal = np.stack([-tangent[:, 1], tangent[:, 0]], axis=1)
             side = np.where(np.arange(len(c)) % 2 == 0, 0.5, -0.5)[:, None]
-            zigzag = c + normal * side * width_px
-            path += [tuple(p) for p in zigzag] + [tuple(zigzag[0]), tuple(zigzag[1])]
+            zig = c + normal * side * width_mm
+            path += [tuple(p) for p in zig] + [tuple(zig[0]), tuple(zig[1])]
         else:
-            q = _resample_closed(loop, s.running_length_mm * px)
+            q = _resample_closed(loop, s.running_length_mm)
             q = np.vstack([q, q[:1]])
             path = [tuple(q[0])]
             for a, b in zip(q[:-1], q[1:]):
                 path += [tuple(b), tuple(a), tuple(b)] if kind == "triple" else [tuple(b)]
         runs.append(path)
-        pen = path[-1]
+        pen = np.array(path[-1])
     return runs, pen
+
+
+def _rings(polys):
+    out = []
+    for p in polys:
+        for ring in [p.exterior, *p.interiors]:
+            out.append(np.asarray(ring.coords)[:-1])
+    return out
+
+
+def _tidy(run, max_len=7.0, min_len=0.2):
+    """Drops needle points that are almost on top of each other and splits very long stitches."""
+    out = [run[0]]
+    for p in run[1:-1]:
+        if math.dist(p, out[-1]) >= min_len:
+            out.append(p)
+    if len(run) > 1:
+        out.append(run[-1])
+    final = [out[0]]
+    for p in out[1:]:
+        _travel(final, p, max_len)
+        final.append(p)
+    return final
 
 
 def digitize(labels, palette, s: Settings):
     """Builds the stitch pattern. Returns (pattern, sources): sources[i] is the palette index
     sewn by thread i, or "outline"."""
     H, W = labels.shape
-    center = (W / 2.0, H / 2.0)
-    scale = PX_MM * UNITS_PER_MM
-    px = 1 / PX_MM
+    center = (W * PX_MM / 2.0, H * PX_MM / 2.0)
 
-    pen, blocks = None, []
+    satin_width = {"auto": s.satin_max_mm, "satin": 12.0, "tatami": 0.0}[s.fill_type]
+    pen, blocks, all_polys = None, [], []
     for ci, rgb in enumerate(palette):
         mask = labels == ci
         if not mask.any():
             continue
-        runs, pen = _color_runs(mask, center, s, pen)
+        polys = _mask_polygons(mask, s.min_area_mm2)
+        if not polys:
+            continue
+        all_polys += polys
+        wide, narrow = _split_narrow(polys, satin_width, s.min_area_mm2)
+        # grow wide areas by the pull compensation: stitching pulls the fabric in, and the growth
+        # also overlaps neighbouring colors slightly so no fabric shows between them
+        wide = [w for w in _polygons_of(unary_union([w.buffer(s.pull_comp_mm) for w in wide]))
+                if w.area >= s.min_area_mm2]
+
+        runs = []
+        todo = list(wide)
+        while todo:
+            if pen is None:
+                k = 0
+            else:
+                k = min(range(len(todo)), key=lambda i: math.dist(pen, todo[i].representative_point().coords[0]))
+            poly = todo.pop(k)
+            new, pen = _tatami(poly, center, s, pen)
+            runs += new
+        todo = list(narrow)
+        while todo:
+            if pen is None:
+                k = 0
+            else:
+                k = min(range(len(todo)), key=lambda i: math.dist(pen, todo[i].representative_point().coords[0]))
+            poly = todo.pop(k)
+            done = _satin_runs(poly, s, pen)
+            if done is None:  # too odd a shape for a column: fill it instead
+                new, pen = _tatami(poly.buffer(s.pull_comp_mm), center, s, pen)
+                runs += new
+            else:
+                new, pen = done
+                runs += new
         if s.edge != "none" and runs:
-            edge, pen = _line_runs(_contours(mask), s.edge, s.edge_width_mm * px, pen, s)
+            edge, pen = _line_runs(_rings(polys), s.edge, s.edge_width_mm, pen, s)
             runs += edge
         if runs:
             blocks.append((rgb, runs, ci))
 
     if s.outline != "none" and blocks:
-        offset = max(0, round(s.outline_offset_mm * px))
-        pad = offset + 2
-        union = _fill_holes(_dilate(np.pad(labels >= 0, pad), offset))
-        loops = [loop - pad for loop in _contours(union)]
-        runs, pen = _line_runs(loops, s.outline, s.outline_width_mm * px, pen, s)
+        union = unary_union([p.buffer(max(0.0, s.outline_offset_mm)) for p in all_polys])
+        shell = [Polygon(p.exterior) for p in _polygons_of(union)]  # outer edge only, holes ignored
+        runs, pen = _line_runs(_rings(shell), s.outline, s.outline_width_mm, pen, s)
         if runs:
             blocks.append((tuple(s.outline_color), runs, "outline"))
 
     if not blocks:
         raise ValueError("Nothing to stitch. Try more colors, or turn off background removal.")
 
-    def units(p):  # pixel -> embroidery units, design centered on the origin
-        return (p[0] - W / 2) * scale, (p[1] - H / 2) * scale
+    def units(p):  # mm -> embroidery units, design centered on the origin
+        return (p[0] - center[0]) * UNITS_PER_MM, (p[1] - center[1]) * UNITS_PER_MM
 
     pattern = EmbPattern()
-    trim_px = s.trim_mm * px
     for rgb, runs, _ in blocks:
         if pattern.threadlist:
             pattern.trim()
@@ -763,7 +1093,10 @@ def digitize(labels, palette, s: Settings):
 
         last = None
         for run in runs:
-            if last is not None and math.dist(last, run[0]) > trim_px:
+            run = _tidy(run)
+            if len(run) < 2:
+                continue
+            if last is not None and math.dist(last, run[0]) > s.trim_mm:
                 pattern.trim()
             pattern.add_stitch_absolute(JUMP, *units(run[0]))
             for p in run:  # the first stitch anchors the thread at the run start
@@ -912,6 +1245,7 @@ def main(argv=None):
     ap.add_argument("--spacing", type=float, default=d.row_spacing_mm, help="tatami row spacing in mm")
     ap.add_argument("--stitch", type=float, default=d.stitch_length_mm, help="tatami stitch length in mm")
     ap.add_argument("--angle", type=float, default=d.fill_angle, help="fill angle in degrees")
+    ap.add_argument("--fixed-angle", action="store_true", help="always use --angle (default: long shapes follow their length)")
     ap.add_argument("--pull", type=float, default=d.pull_comp_mm, help="pull compensation in mm")
     ap.add_argument("--no-underlay", action="store_true")
     ap.add_argument("--edge", default=d.edge, choices=LINE_TYPES, help="finish on every color's edges")
@@ -928,7 +1262,7 @@ def main(argv=None):
         width_mm=args.width, height_mm=args.height, rotate=args.rotate, mirror=args.mirror, colors=args.colors,
         remove_background=not args.keep_background, brother_colors=args.brother_colors, cleanup=args.cleanup,
         fill_type=args.fill, satin_max_mm=args.satin_width, row_spacing_mm=args.spacing,
-        stitch_length_mm=args.stitch, fill_angle=args.angle, pull_comp_mm=args.pull,
+        stitch_length_mm=args.stitch, fill_angle=args.angle, auto_angle=not args.fixed_angle, pull_comp_mm=args.pull,
         underlay=not args.no_underlay, edge=args.edge, edge_width_mm=args.edge_width, outline=args.outline,
         outline_width_mm=args.outline_width, outline_offset_mm=args.outline_offset,
         outline_color=tuple(int(hx[i : i + 2], 16) for i in (0, 2, 4)),
