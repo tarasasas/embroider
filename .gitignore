@@ -4,3 +4,4 @@ ios/Payload/
 ios/*.ipa
 ios/*.xcodeproj/
 ios/Info.plist
+dist/
