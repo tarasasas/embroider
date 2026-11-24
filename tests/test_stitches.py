@@ -118,9 +118,13 @@ def test_fill_underlay():
     plain = dz.convert(square(), settings(width_mm=30, height_mm=30, fill_type="tatami"))
     under = dz.convert(square(), settings(width_mm=30, height_mm=30, fill_type="tatami", underlay=True))
     seg = segments(under.pattern)
-    vertical = seg[(np.abs(seg[:, 2] - seg[:, 0]) < 0.05) & (lengths(seg) > 1.0)]  # cross rows at 90 degrees
-    check("fill underlay (edge walk + cross rows)", len(vertical) > 20 and len(seg) > len(segments(plain.pattern)),
-          f"{len(vertical)} cross-direction underlay stitches")
+    L = lengths(seg)
+    ang = np.degrees(np.arctan2(-(seg[:, 3] - seg[:, 1]), seg[:, 2] - seg[:, 0])) % 180
+    cross = seg[(np.abs(ang - 45) < 2) & (L > 1.0)]  # underlay rows at 45 degrees to the 0-degree top fill
+    rows = np.round((cross[:, 1] - cross[:, 0]) / math.sqrt(2) * 2, 0) if len(cross) else np.array([])
+    spacing = float(np.median(np.diff(np.unique(np.round((cross[:, 0] + cross[:, 1]) / math.sqrt(2), 1))))) if len(cross) > 2 else 0
+    check("fill underlay: 45-degree rows 1.2 mm apart (Brother)", len(cross) > 20 and abs(spacing - 1.2) < 0.15,
+          f"{len(cross)} underlay stitches, rows {spacing:.2f} mm apart")
 
 
 # --------------------------------------------------------------------------- satin

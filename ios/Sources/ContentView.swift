@@ -311,7 +311,7 @@ struct ContentView: View {
     private func applyAutomatic() {
         settings.rowSpacingMM = fabric.rowSpacingMM
         settings.pullCompMM = fabric.pullCompMM
-        settings.stitchLengthMM = 3.5
+        settings.stitchLengthMM = 4.0
         settings.fillAngle = 45
         settings.underlay = true
         settings.cleanup = 1

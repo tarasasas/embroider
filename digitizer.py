@@ -88,7 +88,7 @@ class Settings:
     satin_max_mm: float = 6.5  # "auto": shapes narrower than this become satin
     satin_spacing_mm: float = 0.35
     row_spacing_mm: float = 0.20  # tatami row spacing; smaller = denser (sew-outs on knit needed 0.20)
-    stitch_length_mm: float = 3.5
+    stitch_length_mm: float = 4.0  # Brother's own fills use 3.6-4.2 mm: fewer needle holes, flatter fill
     fill_angle: float = 45.0
     auto_angle: bool = True  # long shapes are sewn along their length; others use fill_angle
     fill_pattern: str = "brick3"  # needle-point offset between rows: brick2 / brick3 / brick4 / diagonal / random
@@ -937,7 +937,9 @@ def _tatami(poly, center, s, pen):
                 walk = _resample_closed(np.asarray(part.exterior.coords)[:-1], 2.5)
                 runs.append([tuple(p) for p in walk] + [tuple(walk[0])])
                 pen = walk[0]
-            under, pen = _fill_rows(_scan_poly(part, center, angle + 90, 2.0), 2.0, 3.0, 1.0,
+            # rows 1.2 mm apart at 45 degrees to the top fill, 4 mm stitches: measured from
+            # Brother's own designs; a firm base keeps the top stitches from sinking into knits
+            under, pen = _fill_rows(_scan_poly(part, center, angle + 45, 1.2), 1.2, 4.0, 1.0,
                                     4 * s.min_area_mm2, pen)
             runs += under
     top, pen = _fill_rows(_scan_poly(poly, center, angle, s.row_spacing_mm), s.row_spacing_mm,
