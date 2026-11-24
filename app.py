@@ -5,6 +5,7 @@ import queue
 import threading
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
+from tkinter import font as tkfont
 
 from PIL import Image, ImageTk
 
@@ -308,12 +309,11 @@ class App(tk.Tk):
         entry = tk.Text(frame, width=34, height=3, font=("Segoe UI", 11))
         entry.grid(row=1, column=0, columnspan=2, pady=(2, 8))
         entry.focus_set()
-        ttk.Label(frame, text="Font").grid(row=2, column=0, sticky="w")
         names = list(fonts)
         default = next((n for n in names if n.lower().startswith("arial bold")), names[0])
         font_var = tk.StringVar(value=default)
-        ttk.Combobox(frame, textvariable=font_var, values=names, state="readonly", width=30).grid(
-            row=2, column=1, sticky="e")
+        picker = self._font_picker(frame, fonts, font_var, entry)
+        picker.grid(row=2, column=0, columnspan=2, sticky="nsew")
         rgb = [0, 0, 0]
         swatch = tk.Label(frame, width=4, background="#000000", relief="solid", borderwidth=1)
 
@@ -341,6 +341,83 @@ class App(tk.Tk):
 
         ttk.Button(frame, text="Use this text", command=ok).grid(row=4, column=0, columnspan=2, sticky="ew")
         win.bind("<Control-Return>", lambda e: ok())
+
+    SYMBOL_FONTS = ("wingdings", "webdings", "marlett", "symbol", "mt extra", "mdl2", "fluent icons", "bookshelf")
+
+    def _font_picker(self, parent, fonts, font_var, entry):
+        """A searchable list where every font's name is written in that font. Picking one also shows
+        the typed text in it."""
+        box = ttk.Frame(parent)
+        ttk.Label(box, text="Font").grid(row=0, column=0, sticky="w")
+        query = tk.StringVar()
+        search = ttk.Entry(box, textvariable=query, width=24)
+        search.grid(row=0, column=1, sticky="e", pady=(0, 4))
+        ttk.Label(box, text="search", foreground="#888").grid(row=0, column=2, sticky="w", padx=(4, 0))
+        listing = tk.Text(box, width=40, height=12, wrap="none", cursor="hand2", relief="solid", borderwidth=1,
+                          padx=6, pady=4, spacing1=3, spacing3=3)
+        bar = ttk.Scrollbar(box, orient="vertical", command=listing.yview)
+        listing.configure(yscrollcommand=bar.set)
+        listing.grid(row=1, column=0, columnspan=3, sticky="nsew")
+        bar.grid(row=1, column=3, sticky="ns")
+
+        tk_fonts, plain = {}, tkfont.Font(family="Segoe UI", size=9)
+        tag_of = {name: f"f{i}" for i, name in enumerate(fonts)}  # Tk splits tag names at spaces
+        families = set(tkfont.families())
+
+        def tk_font(name, size=14):
+            """The Tk font for a listed font: its family, plus bold/italic from its style."""
+            key = (name, size)
+            if key not in tk_fonts:
+                try:
+                    family, style = dz.ImageFont.truetype(fonts[name], 10).getname()
+                except Exception:
+                    family, style = name, ""
+                st = (style or "").lower()
+                if f"{family} {style}" in families:  # e.g. "Arial Black" is its own family on Windows
+                    family, st = f"{family} {style}", ""
+                tk_fonts[key] = tkfont.Font(
+                    family=family, size=size,
+                    weight="bold" if any(w in st for w in ("bold", "black", "heavy", "semibold")) else "normal",
+                    slant="italic" if ("italic" in st or "oblique" in st) else "roman")
+            return tk_fonts[key]
+
+        def show_choice():
+            entry.configure(font=tk_font(font_var.get(), 16))  # the typed text, in the chosen font
+            listing.tag_remove("chosen", "1.0", "end")
+            ranges = listing.tag_ranges(tag_of[font_var.get()])
+            if ranges:
+                listing.tag_add("chosen", ranges[0], f"{ranges[0]} lineend")
+                listing.see(ranges[0])
+
+        def choose(name):
+            font_var.set(name)
+            show_choice()
+
+        def fill(*_):
+            q = query.get().strip().lower()
+            listing.configure(state="normal")
+            listing.delete("1.0", "end")
+            for name in fonts:
+                if q and q not in name.lower():
+                    continue
+                tag = tag_of[name]
+                listing.tag_configure(tag, font=tk_font(name))
+                listing.tag_bind(tag, "<Button-1>", lambda e, n=name: choose(n))
+                listing.insert("end", name, tag)
+                if any(sym in name.lower() for sym in self.SYMBOL_FONTS):  # symbol fonts: say what they are
+                    listing.insert("end", f"   ({name})", ("plain", tag))
+                listing.insert("end", "\n", tag)
+            listing.tag_configure("plain", font=plain, foreground="#888")
+            listing.tag_configure("chosen", background="#cfe3ff")
+            listing.configure(state="disabled")
+            show_choice()
+
+        query.trace_add("write", fill)
+        fill()
+        # keep the fonts and the search variable alive as long as the list is shown (Tk drops a
+        # font as soon as Python forgets it, and the list would fall back to a plain font)
+        box.keep = (tk_fonts, plain, query, fill, choose, tag_of)
+        return box
 
     def _set_source(self, img, name, label):
         self.source, self.source_path, self.result = img, name, None

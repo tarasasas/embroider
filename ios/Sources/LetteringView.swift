@@ -197,11 +197,12 @@ struct LetteringView: View {
         return Button {
             fontName = f.postScript
         } label: {
-            VStack(spacing: 4) {
-                Text("Abc").font(.custom(f.postScript, size: 26)).lineLimit(1)
-                Text(f.name).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-            }
-            .frame(width: 96, height: 70)
+            Text(f.name)  // each font's name, written in that font
+                .font(.custom(f.postScript, size: 19))
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .padding(.horizontal, 10)
+                .frame(minWidth: 96, minHeight: 54)
             .background(RoundedRectangle(cornerRadius: 12).fill(selected ? Color.accentColor.opacity(0.15) : Color(.secondarySystemGroupedBackground)))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(selected ? Color.accentColor : Color.black.opacity(0.08), lineWidth: selected ? 2 : 1))
         }
