@@ -335,7 +335,7 @@ def test_coverage_no_gaps():
         check(f"coverage: {name}", share < 0.006, f"{100 * share:.2f}% of the art without thread")
         # and the reverse: no stitch may run across bare fabric (shows as a stray black strand)
         import shapely
-        inside = art.buffer(0.35)
+        inside = art.buffer(s.pull_comp_mm + 0.15)  # shapes are sewn bigger by the pull compensation on purpose
         shapely.prepare(inside)
         prev, worst, count = None, 0.0, 0
         for x, y, c in pattern.stitches:

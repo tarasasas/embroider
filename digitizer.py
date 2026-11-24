@@ -54,7 +54,7 @@ HOOPS = {
 FABRICS = {
     "Woven cotton": ({"row_spacing_mm": 0.20, "satin_spacing_mm": 0.35, "pull_comp_mm": 0.15, "underlay": True},
                      "Medium tear-away stabilizer."),
-    "T-shirt / knit": ({"row_spacing_mm": 0.20, "satin_spacing_mm": 0.35, "pull_comp_mm": 0.25, "underlay": True},
+    "T-shirt / knit": ({"row_spacing_mm": 0.20, "satin_spacing_mm": 0.35, "pull_comp_mm": 0.45, "underlay": True},
                        "Cut-away stabilizer, so the knit can't stretch while it is sewn."),
     "Denim / canvas": ({"row_spacing_mm": 0.20, "satin_spacing_mm": 0.35, "pull_comp_mm": 0.1, "underlay": True},
                        "Tear-away stabilizer and a size 90/14 needle."),
@@ -952,7 +952,9 @@ def _tatami(poly, center, s, pen):
             angle = along
     runs = []
     if s.underlay:
-        for part in _polygons_of(poly.buffer(-0.4)):
+        # underlay kept 0.8 mm inside the edge: if the fabric pulls the top fill in a little, the
+        # underlay is still covered instead of showing as a thin outline
+        for part in _polygons_of(poly.buffer(-0.8)):
             if part.area < 2.0:
                 continue
             if part.area >= 12.0:  # edge walk: holds the edge down before the rows go on top

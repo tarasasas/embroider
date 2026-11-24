@@ -21,7 +21,7 @@ enum Fabric: String, CaseIterable, Identifiable {
     var pullCompMM: Double {
         switch self {
         case .woven: return 0.15
-        case .knit: return 0.25
+        case .knit: return 0.45
         case .denim: return 0.1
         case .towel, .cap: return 0.2
         }
