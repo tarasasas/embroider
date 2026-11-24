@@ -9,6 +9,7 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
 import digitizer as dz
+import realistic
 from simulator import SewSimulator
 
 IMAGE_TYPES = [("Images and vector logos", "*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff *.svg"),
@@ -49,6 +50,8 @@ class App(tk.Tk):
         self.hoop = tk.StringVar(value=hoop)
         self.width_in = tk.DoubleVar(value=round((dz.HOOPS[hoop][0] - 10) / MM_PER_INCH, 2))
         self.height_in = tk.DoubleVar(value=round((dz.HOOPS[hoop][1] - 10) / MM_PER_INCH, 2))
+        self.shirt_rgb = realistic.SHIRT_WHITE  # preview only: the fabric the design is shown on
+        self.realistic_view = tk.BooleanVar(value=True)
         self.lock = tk.BooleanVar(value=True)  # keep width x height in the image's proportions
         self.aspect = 1.0
         self._syncing = False
@@ -114,6 +117,12 @@ class App(tk.Tk):
         self._spin(basics, 2, "Thread colors (0 = auto)", self.colors, 0, 15, 1)
         ttk.Checkbutton(basics, text="Remove background", variable=self.remove_bg).grid(
             row=3, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(basics, text="Shirt color (preview)").grid(row=4, column=0, sticky="w", pady=2)
+        self.shirt_btn = tk.Button(basics, width=6, relief="solid", borderwidth=1, cursor="hand2",
+                                   background=dz.hex_color(self.shirt_rgb), command=self._pick_shirt)
+        self.shirt_btn.grid(row=4, column=1, sticky="e", pady=2)
+        ttk.Checkbutton(basics, text="Realistic thread preview", variable=self.realistic_view,
+                        command=self._view_changed).grid(row=5, column=0, columnspan=2, sticky="w", pady=2)
 
         self.advanced_toggle = ttk.Checkbutton(side, text="Show advanced settings", variable=self.show_advanced,
                                                command=self._toggle_advanced)
@@ -391,11 +400,12 @@ class App(tk.Tk):
         self.config(cursor="watch")
 
         hoop = dz.HOOPS.get(self.hoop.get())  # read Tk variables here, not in the worker thread
+        view = self._view()
 
         def work(img=self.source):
             try:
                 result = dz.convert(img, s)
-                previews = dz.color_preview(result.labels, result.palette), dz.render_preview(result.pattern, hoop_mm=hoop)
+                previews = dz.color_preview(result.labels, result.palette), dz.render_preview(result.pattern, hoop_mm=hoop, **view)
                 self.jobs.put((result, previews, None))
             except Exception as exc:
                 self.jobs.put((None, None, exc))
@@ -479,6 +489,24 @@ class App(tk.Tk):
             t.insert("end", "\n")
         t.config(state="disabled")
 
+    def _view(self):
+        return {"style": "realistic" if self.realistic_view.get() else "flat", "fabric": self.shirt_rgb}
+
+    def _pick_shirt(self):
+        chosen = colorchooser.askcolor(color=dz.hex_color(self.shirt_rgb), title="Shirt color", parent=self)
+        if chosen and chosen[0]:
+            self.shirt_rgb = tuple(int(v) for v in chosen[0])
+            self.shirt_btn.config(background=dz.hex_color(self.shirt_rgb))
+            self._view_changed()
+
+    def _view_changed(self):
+        """Redraws the stitch preview and the sew simulation in the chosen style and shirt color."""
+        self.sim.set_style(self.realistic_view.get(), self.shirt_rgb)
+        if self.result is not None:
+            self.images["stitches"] = dz.render_preview(self.result.pattern, hoop_mm=dz.HOOPS.get(self.hoop.get()),
+                                                        **self._view())
+            self._show(self._current_tab())
+
     def _toggle_applique(self, keys):
         """Applique: the machine sews a placement line, stops for you to lay fabric, tacks it down,
         stops for you to trim it, then covers the edge with satin."""
@@ -520,7 +548,7 @@ class App(tk.Tk):
         thread.description = dz.nearest_brother_thread(rgb)[1]
         for entry in (threads[index], self.result.info["threads"][index]):
             entry.update(rgb=rgb, hex=dz.hex_color(rgb), name=thread.description)
-        self.images["stitches"] = dz.render_preview(pattern, hoop_mm=dz.HOOPS.get(self.hoop.get()))
+        self.images["stitches"] = dz.render_preview(pattern, hoop_mm=dz.HOOPS.get(self.hoop.get()), **self._view())
         self._set_threads(threads)
         self.sim.load(pattern)
         self.tabs.select(2)

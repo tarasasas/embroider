@@ -14,7 +14,7 @@ python app.py
 
 1. **Open image...** (or **Lettering...** to type words): the app generates a first version right away.
 2. Pick your **hoop** and **fabric**. The fabric sets the stitch density, pull compensation and the rest for you, and shows the stabilizer to use. Change the number of **thread colors** if needed, then click **Generate stitches**.
-3. Look at the **Stitch preview** tab and the thread list. The list shows the closest Brother thread name for each color, in sewing order. Click a color swatch to change that thread's color. The **Sew simulation** tab replays the stitching in machine order.
+3. Look at the **Stitch preview** tab (realistic thread on a knit fabric; set **Shirt color** to see it on your shirt) and the thread list. The list shows the closest Brother thread name for each color, in sewing order. Click a color swatch to change that thread's color. The **Sew simulation** tab plays the stitching in machine order, in the same realistic style: underlay first, then fills, satin, travel and trims, with a pause at each thread change.
 4. **Save embroidery file...** to write a `.pes`. Copy it to a USB stick, or send it to the machine over USB or wireless.
 
 **Vector logos (.svg)** open directly and give the cleanest stitches: edges stay perfectly crisp at

@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 
 import numpy as np
+import realistic
 from PIL import Image, ImageDraw, ImageTk
 from pyembroidery import COLOR_CHANGE, END, JUMP, STITCH
 
@@ -36,6 +37,9 @@ class SewSimulator(ttk.Frame):
         self._acc = 0.0
         self._last = 0.0
 
+        self.realistic = True  # shaded thread on knit fabric; False = plain lines
+        self.fabric_rgb = realistic.SHIRT_WHITE
+        self.painter = None
         self.position = tk.DoubleVar(value=0)
         self.speed = tk.DoubleVar(value=0.45)  # 0..1 on a log scale
         self.stop_at_colors = tk.BooleanVar(value=True)
@@ -188,9 +192,18 @@ class SewSimulator(ttk.Frame):
         self.offset = ((cw - w) // 2, (ch - h) // 2)
 
         # faint image of the whole design, so you can see what is still to come
-        full = Image.new("RGB", (w * SS, h * SS), FABRIC)
-        self._draw_segments(ImageDraw.Draw(full), 0, len(self.lines), jumps=False)
-        self.ghost = Image.blend(Image.new("RGB", full.size, FABRIC), full, 0.18)
+        if self.realistic:
+            self.px_per_mm = s * 10  # s is pixels per 0.1 mm
+            fabric = realistic.fabric_texture((w * SS, h * SS), self.fabric_rgb, self.px_per_mm)
+            whole = realistic.ThreadPainter(fabric.size, self.px_per_mm, fabric=fabric)
+            for x0, y0, x1, y1, c, is_jump in self.lines:
+                if not is_jump:
+                    whole.stitch((x0, y0), (x1, y1), self.colors[min(c, len(self.colors) - 1)])
+            self.ghost = Image.blend(fabric, whole.compose(), 0.18)
+        else:
+            full = Image.new("RGB", (w * SS, h * SS), FABRIC)
+            self._draw_segments(ImageDraw.Draw(full), 0, len(self.lines), jumps=False)
+            self.ghost = Image.blend(Image.new("RGB", full.size, FABRIC), full, 0.18)
 
         self.photo = ImageTk.PhotoImage("RGB", (w, h))
         canvas.create_image(*self.offset, image=self.photo, anchor="nw")
@@ -202,9 +215,34 @@ class SewSimulator(ttk.Frame):
         self._needle_at = (0, 0)
         self._redraw()
 
+    def set_style(self, realistic_on=None, fabric_rgb=None):
+        """Switches between realistic and plain drawing, and sets the fabric (shirt) color."""
+        if realistic_on is not None:
+            self.realistic = bool(realistic_on)
+        if fabric_rgb is not None:
+            self.fabric_rgb = tuple(fabric_rgb)
+        self._layout()
+
+    def _new_canvas(self):
+        """Bare fabric (plus the faint whole design) to sew onto."""
+        if self.realistic:
+            self.painter = realistic.ThreadPainter(self.ghost.size, self.px_per_mm, fabric=self.ghost)
+            self.img = self.ghost
+        else:
+            self.painter = None
+            self.img = self.ghost.copy()
+
     def _draw_segments(self, draw, a, b, jumps):
-        """Paints segments a..b, merging connected stitches of one color into polylines."""
+        """Paints segments a..b: shaded thread (realistic) or polylines of one color (plain)."""
         lines, colors, width = self.lines, self.colors, self.width
+        if self.realistic and self.painter is not None and draw is None:
+            for x0, y0, x1, y1, c, is_jump in lines[a:b]:
+                if is_jump:
+                    if jumps:
+                        self.painter.draw.line((x0, y0, x1, y1), fill=JUMP_COLOR + (255,), width=SS)
+                else:
+                    self.painter.stitch((x0, y0), (x1, y1), colors[min(c, len(colors) - 1)])
+            return
         poly, poly_color = [], 0
 
         def flush():
@@ -228,7 +266,7 @@ class SewSimulator(ttk.Frame):
     def _redraw(self):
         if self.pattern is None or self.photo is None:
             return
-        self.img = self.ghost.copy()
+        self._new_canvas()
         self.drawn = 0
         self.goto(self.pos, keep_message=True)
 
@@ -239,17 +277,18 @@ class SewSimulator(ttk.Frame):
         if not keep_message:
             self.message = ""
         if p < self.drawn:  # going backwards: start again from bare fabric
-            self.img = self.ghost.copy()
+            self._new_canvas()
             self.drawn = 0
         if p > self.drawn:
-            self._draw_segments(ImageDraw.Draw(self.img), self._seg_end(self.drawn), self._seg_end(p),
-                                self.show_jumps.get())
+            target = None if self.realistic else ImageDraw.Draw(self.img)
+            self._draw_segments(target, self._seg_end(self.drawn), self._seg_end(p), self.show_jumps.get())
         self.drawn = self.pos = p
         self._present()
 
     def _present(self):
         p = self.pos
-        self.photo.paste(self.img.reduce(SS))
+        frame = self.painter.compose() if (self.realistic and self.painter is not None) else self.img
+        self.photo.paste(frame.reduce(SS))
         self.position.set(p)
 
         x0, y0, x1, y1, _, _ = self.lines[self.stitch_seg[max(p - 1, 0)]]

@@ -1536,11 +1536,17 @@ def convert(img: Image.Image, s: Settings) -> Result:
     return Result(pattern, labels, palette, info, threads)
 
 
-def render_preview(pattern: EmbPattern, max_px=1400, background=(236, 232, 224), hoop_mm=None) -> Image.Image:
-    """Draws the stitches as thread lines (2x supersampled for smooth edges).
+def render_preview(pattern: EmbPattern, max_px=1400, background=(236, 232, 224), hoop_mm=None,
+                   style="realistic", fabric=None) -> Image.Image:
+    """Draws the design. style="realistic" (default): shaded thread with sheen and shadows on a knit
+    fabric in `fabric` color; style="flat": plain thread lines on `background`.
 
     With `hoop_mm` = (width, height) the hoop's sewing field is outlined around the design.
     """
+    if style == "realistic":
+        import realistic
+        return realistic.render(pattern, max_px=max_px, hoop_mm=hoop_mm,
+                                fabric_rgb=tuple(fabric) if fabric else realistic.SHIRT_WHITE)
     min_x, min_y, max_x, max_y = pattern.bounds()
     if hoop_mm:
         hw, hh = hoop_mm[0] * UNITS_PER_MM / 2, hoop_mm[1] * UNITS_PER_MM / 2
