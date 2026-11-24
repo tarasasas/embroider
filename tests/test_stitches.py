@@ -167,7 +167,7 @@ def test_satin_underlay_by_width():
         along = seg[(np.abs(seg[:, 3] - seg[:, 1]) < 0.3 * np.maximum(L, 1e-9)) & (L > 1.0)]
         offs = np.abs((along[:, 1] + along[:, 3]) / 2 - mid)
         centre = int((offs < 0.3).sum())
-        edge = int((offs > width_mm / 2 - 0.8).sum())
+        edge = int((offs > max(0.5, width_mm / 2 - 1.2)).sum())  # edge runs sit up to 20% of the width inside
         diag = seg[(np.abs(seg[:, 2] - seg[:, 0]) > 0.8) & (np.abs(seg[:, 3] - seg[:, 1]) > 0.5 * width_mm)
                    & (L < 1.2 * width_mm)]
         if kind == "centre run":

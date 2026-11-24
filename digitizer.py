@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import io
 import math
+import heapq
 from collections import deque
 import os
 from dataclasses import dataclass, field, replace
@@ -1174,7 +1175,7 @@ def _satin_column(poly, path, closed, leaf_a, leaf_b, radius, step, s):
         return top
     if width < 2.5:
         return center + top[::-1]
-    inset = min(0.4, width / 6)
+    inset = max(0.6, 0.2 * width) if width >= 3.0 else min(0.5, width / 5)  # well inside, so pull-in can't expose it
     edge_a = [tuple(pts[i] + normal[i] * (lo[i] + inset)) for i in every(2.0)]
     edge_b = [tuple(pts[i] + normal[i] * (hi[i] - inset)) for i in every(2.0)][::-1]
     if width < 4.0:
@@ -1274,7 +1275,9 @@ class _Router:
 
     CELL = 0.4  # mm
 
-    def __init__(self, inside):
+    def __init__(self, inside, deep=None):
+        """`inside`: where travel may go at all. `deep`: where it should go when it can (well away
+        from the edges, so fabric pull-in can't expose it); edge cells cost 5x as much."""
         self.inside = inside
         x0, y0, x1, y1 = inside.bounds
         self.x0, self.y0 = x0, y0
@@ -1282,15 +1285,38 @@ class _Router:
         self.h = max(1, int(math.ceil((y1 - y0) / self.CELL)) + 1)
         gx, gy = np.meshgrid(x0 + np.arange(self.w) * self.CELL, y0 + np.arange(self.h) * self.CELL)
         self.ok = shapely.contains_xy(inside, gx, gy)
+        self.deep = shapely.contains_xy(deep, gx, gy) if deep is not None and not deep.is_empty else self.ok
+        self.cost = np.where(self.deep, 1.0, 5.0)
+
+    def deep_line(self, a, b):
+        """True if the straight line a-b stays in the deep zone (sampled on the grid)."""
+        n = max(2, int(math.dist(a, b) / (self.CELL / 2)))
+        for t in np.linspace(0, 1, n):
+            x, y = a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t
+            cx, cy = int(round((x - self.x0) / self.CELL)), int(round((y - self.y0) / self.CELL))
+            if not (0 <= cx < self.w and 0 <= cy < self.h and self.deep[cy, cx]):
+                return False
+        return True
+
+    def deep_line_ok(self, simple, line):
+        """Simplifying may cut corners; only accept it if it doesn't leave the deep zone more."""
+        def shallow_share(ls):
+            pts = [ls.interpolate(t, normalized=True).coords[0] for t in np.linspace(0, 1, 40)]
+            out = 0
+            for x, y in pts:
+                cx, cy = int(round((x - self.x0) / self.CELL)), int(round((y - self.y0) / self.CELL))
+                out += not (0 <= cx < self.w and 0 <= cy < self.h and self.deep[cy, cx])
+            return out
+        return shallow_share(simple) <= shallow_share(line)
 
     def _cell(self, p):
         cx = int(round((p[0] - self.x0) / self.CELL))
         cy = int(round((p[1] - self.y0) / self.CELL))
         if 0 <= cx < self.w and 0 <= cy < self.h and self.ok[cy, cx]:
             return cy, cx
-        best = None  # the point sits right at an edge: use the nearest open cell close by
-        for dy in range(-2, 3):
-            for dx in range(-2, 3):
+        best = None  # the point sits at (or just past) an edge: use the nearest open cell within 1.6 mm
+        for dy in range(-4, 5):
+            for dx in range(-4, 5):
                 y, x = cy + dy, cx + dx
                 if 0 <= x < self.w and 0 <= y < self.h and self.ok[y, x]:
                     d = dx * dx + dy * dy
@@ -1299,23 +1325,31 @@ class _Router:
         return best[1] if best else None
 
     def path(self, a, b, max_len):
-        if self.inside.contains(LineString([a, b])):
-            return [a, b]
         start, goal = self._cell(a), self._cell(b)
         if start is None or goal is None:
             return None
+        if self.deep[start] and self.deep[goal] and self.deep_line(a, b):
+            return [a, b]
+        # cheapest path, where cells near the edge cost more: travel goes through the middle
         prev = {start: None}
-        queue = deque([start])
-        steps = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
-        while queue:
-            cur = queue.popleft()
+        best = {start: 0.0}
+        heap = [(0.0, start)]
+        steps = ((1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
+                 (1, 1, 1.414), (1, -1, 1.414), (-1, 1, 1.414), (-1, -1, 1.414))
+        while heap:
+            d, cur = heapq.heappop(heap)
             if cur == goal:
                 break
-            for dy, dx in steps:
+            if d > best.get(cur, 1e18):
+                continue
+            for dy, dx, step in steps:
                 nxt = (cur[0] + dy, cur[1] + dx)
-                if 0 <= nxt[0] < self.h and 0 <= nxt[1] < self.w and self.ok[nxt] and nxt not in prev:
-                    prev[nxt] = cur
-                    queue.append(nxt)
+                if 0 <= nxt[0] < self.h and 0 <= nxt[1] < self.w and self.ok[nxt]:
+                    nd = d + step * self.cost[nxt]
+                    if nd < best.get(nxt, 1e18):
+                        best[nxt] = nd
+                        prev[nxt] = cur
+                        heapq.heappush(heap, (nd, nxt))
         if goal not in prev:
             return None
         cells, cur = [], goal
@@ -1325,7 +1359,7 @@ class _Router:
         pts = [a] + [(self.x0 + x * self.CELL, self.y0 + y * self.CELL) for y, x in reversed(cells)] + [b]
         line = LineString(pts)
         simple = line.simplify(0.3)
-        if self.inside.buffer(0.1).contains(simple):
+        if self.inside.buffer(0.1).contains(simple) and self.deep_line_ok(simple, line):
             line = simple
         if line.length > max_len:
             return None
@@ -1471,11 +1505,15 @@ def digitize(labels, palette, s: Settings, groups=None):
         # Moving to the next part of the same color: if a straight path stays inside this color's
         # shapes, sew small running stitches along it (hidden in the same-color stitching) instead
         # of cutting the thread. Every trim leaves a tail on the fabric, so this is much cleaner.
-        inside = region.buffer(-0.2) if region is not None else None
+        # hidden travel keeps 0.8 mm inside the shape: a shortest path hugs the edges, and right at
+        # the edge a little fabric pull-in leaves it showing as a thin line beside the stitching.
+        # Narrow parts that would vanish at 0.8 mm still allow travel at 0.3 mm.
+        inside = region.buffer(-0.3) if region is not None else None
+        deep = region.buffer(-0.8) if region is not None else None
         router = None
         if inside is not None and not inside.is_empty:
             shapely.prepare(inside)
-            router = _Router(inside)
+            router = _Router(inside, deep)
         last = None
         for run in runs:
             if isinstance(run, str):  # STOP_MARK: the machine pauses (applique fabric steps)
@@ -1492,7 +1530,7 @@ def digitize(labels, palette, s: Settings, groups=None):
             gap = math.dist(last, run[0]) if last is not None else 0.0
             route = None
             if last is not None and gap > 0.05 and router is not None:
-                route = router.path(tuple(last), tuple(run[0]), max_len=max(25.0, 2.5 * gap))
+                route = router.path(tuple(last), tuple(run[0]), max_len=max(35.0, 4.0 * gap))
             if route:
                 path = [route[0]]
                 for p in route[1:]:
