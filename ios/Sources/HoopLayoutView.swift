@@ -209,10 +209,6 @@ struct HoopLayoutView: View {
                        height: height)
             }
         }
-        if !draft.motif.isEmpty,
-           let image = LetteringRenderer.render(draft, font: .systemFont(ofSize: LetteringRenderer.pointSize), motifOnly: true) {
-            insert(image: image, title: draft.motif, colors: [draft.motifColor], height: 21)
-        }
     }
 
     private func insert(image: UIImage, title: String, colors: Set<UIColor>, height: CGFloat) {

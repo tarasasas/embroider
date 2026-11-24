@@ -404,7 +404,7 @@ class App(tk.Tk):
         placement = tk.StringVar(value=draft.get("placement", "Right"))
         scale = tk.DoubleVar(value=draft.get("scale", 0.6))
 
-        if not motif_only:
+        if not motif_only and not on_layout:
             ttk.Label(opts, text="Shape").grid(row=0, column=0, sticky="w", pady=2)
             ttk.Combobox(opts, textvariable=shape, values=dz.TEXT_SHAPES, state="readonly", width=14).grid(
                 row=0, column=1, sticky="w", pady=2)
@@ -415,6 +415,7 @@ class App(tk.Tk):
                                         state="readonly", width=7)
             ttk.Label(opts, text="Alignment").grid(row=9, column=0, sticky="w")
             align_picker.grid(row=9, column=1, sticky="w")
+        if not motif_only:
             ttk.Label(opts, text="Letter height").grid(row=10, column=0, sticky="w")
             ttk.Scale(opts, from_=0.5, to=3, variable=height_scale, length=100).grid(row=10, column=1, sticky="w")
             height_label = ttk.Label(opts)
@@ -450,13 +451,14 @@ class App(tk.Tk):
             ttk.Label(opts, text="Stitch style").grid(row=6, column=0, sticky="w", pady=(8, 2))
             ttk.Combobox(opts, textvariable=style, values=list(STITCH_STYLES), state="readonly", width=24).grid(
                 row=6, column=1, columnspan=2, sticky="w", pady=(8, 2))
-        ttk.Label(opts, text="Motif").grid(row=7, column=0, sticky="w")
-        ttk.Combobox(opts, textvariable=motif, state="readonly", width=14,
-                     values=motifs if motif_only else ["None", *motifs]).grid(row=7, column=1, sticky="w")
-        swatches["motif"] = tk.Button(opts, width=4, background="#%02x%02x%02x" % colors["motif"],
-                                      command=lambda: pick("motif"))
-        swatches["motif"].grid(row=7, column=2, sticky="w")
-        if not motif_only:
+        if motif_only or not on_layout:
+            ttk.Label(opts, text="Motif").grid(row=7, column=0, sticky="w")
+            ttk.Combobox(opts, textvariable=motif, state="readonly", width=14,
+                         values=motifs if motif_only else ["None", *motifs]).grid(row=7, column=1, sticky="w")
+            swatches["motif"] = tk.Button(opts, width=4, background="#%02x%02x%02x" % colors["motif"],
+                                          command=lambda: pick("motif"))
+            swatches["motif"].grid(row=7, column=2, sticky="w")
+        if not motif_only and not on_layout:
             ttk.Label(opts, text="Motif placement / size").grid(row=8, column=0, sticky="w")
             ttk.Combobox(opts, textvariable=placement, state="readonly", width=10,
                          values=("Left", "Right", "Above", "Below")).grid(row=8, column=1, sticky="w")
@@ -501,7 +503,8 @@ class App(tk.Tk):
                 use_design.config(state="disabled")
                 return
             if img is None:
-                preview.config(image="", text="Choose a motif" if motif_only else "Type some text or choose a motif")
+                prompt = "Choose a motif" if motif_only else "Type some text"
+                preview.config(image="", text=prompt)
                 use_design.config(state="disabled")
                 return
             shown = Image.new("RGB", img.size, (235, 235, 235))
@@ -550,8 +553,9 @@ class App(tk.Tk):
             targets.current(0)
             show_target()
 
-        if not motif_only:
+        if not motif_only and not on_layout:
             shape.trace_add("write", shape_changed)
+        if not motif_only:
             targets.bind("<<ComboboxSelected>>", show_target)
             update_targets(previous_text)
         for var in (bend, align, motif, placement, scale, height_scale):
@@ -627,7 +631,7 @@ class App(tk.Tk):
         win.bind("<Escape>", lambda e: close())
         win.bind("<Control-Return>", lambda e: ok())
         win.keep = (state, colors, use, width, swatches)
-        if motif_only:
+        if motif_only or on_layout:
             refresh()
         else:
             shape_changed()

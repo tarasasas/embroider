@@ -100,14 +100,18 @@ struct LetteringView: View {
                                 .font(.system(size: 20, weight: .semibold))
                                 .lineLimit(1...4)
                             letterTargets
+                            slider("Letter height: \(Int((draft.heightScale * 100).rounded()))%",
+                                   value: $draft.heightScale, in: 0.5...3)
                             DisclosureGroup("Style", isExpanded: $showStyle) { styleControls }
                         }
                     }
-                    Section {
-                        if motifOnly {
-                            motifControls
-                        } else {
-                            DisclosureGroup("Motif", isExpanded: $showMotif) { motifControls }
+                    if motifOnly || !placingElements {
+                        Section {
+                            if motifOnly {
+                                motifControls
+                            } else {
+                                DisclosureGroup("Motif", isExpanded: $showMotif) { motifControls }
+                            }
                         }
                     }
                     if !placingElements {
@@ -213,7 +217,7 @@ struct LetteringView: View {
                 }
             }
             .frame(height: 185)
-            if let image, !motifOnly, draft.shape == .straight, draft.letterFonts.isEmpty,
+            if let image, !motifOnly, !placingElements, draft.shape == .straight, draft.letterFonts.isEmpty,
                !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let ink = image.size
                 let scale = min((hoopMM.w - 10) / ink.width, (hoopMM.h - 10) / ink.height)
@@ -230,23 +234,24 @@ struct LetteringView: View {
 
     private var styleControls: some View {
         VStack(alignment: .leading, spacing: 12) {
-            slider("Height: \(Int((draft.heightScale * 100).rounded()))%", value: $draft.heightScale, in: 0.5...3)
-            Picker("Shape", selection: $draft.shape) {
-                ForEach(LetteringShape.allCases) { Text($0.rawValue).tag($0) }
-            }
-            if draft.shape != .straight && draft.shape != .circle {
-                slider("Bend", value: $draft.bend, in: 0...1)
-            }
-            if draft.shape == .straight || draft.shape == .slant {
-                Picker("Alignment", selection: $draft.alignment) {
-                    Image(systemName: "text.alignleft").accessibilityLabel("Left").tag(0)
-                    Image(systemName: "text.aligncenter").accessibilityLabel("Center").tag(1)
-                    Image(systemName: "text.alignright").accessibilityLabel("Right").tag(2)
+            if !placingElements {
+                Picker("Shape", selection: $draft.shape) {
+                    ForEach(LetteringShape.allCases) { Text($0.rawValue).tag($0) }
                 }
-                .pickerStyle(.segmented)
-                slider("Line spacing", value: $draft.lineSpacing, in: 0...120)
+                if draft.shape != .straight && draft.shape != .circle {
+                    slider("Bend", value: $draft.bend, in: 0...1)
+                }
+                if draft.shape == .straight || draft.shape == .slant {
+                    Picker("Alignment", selection: $draft.alignment) {
+                        Image(systemName: "text.alignleft").accessibilityLabel("Left").tag(0)
+                        Image(systemName: "text.aligncenter").accessibilityLabel("Center").tag(1)
+                        Image(systemName: "text.alignright").accessibilityLabel("Right").tag(2)
+                    }
+                    .pickerStyle(.segmented)
+                    slider("Line spacing", value: $draft.lineSpacing, in: 0...120)
+                }
+                slider("Letter spacing", value: $draft.letterSpacing, in: -10...40)
             }
-            slider("Letter spacing", value: $draft.letterSpacing, in: -10...40)
             ColorPicker("Letter color", selection: colorBinding($draft.threadColor), supportsOpacity: false)
             effectControls("Outline", effect: $draft.outline, amount: "Width")
             effectControls("Second outline", effect: $draft.outside, amount: "Width")

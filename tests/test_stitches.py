@@ -258,6 +258,23 @@ def test_knockdown():
 # --------------------------------------------------------------------------- whole designs
 
 
+def test_fixed_hoop_positions():
+    # A tall piece and a wide piece leave most of the hoop empty.
+    art = Image.new("RGBA", (1000, 1000))
+    draw = ImageDraw.Draw(art)
+    draw.rectangle((120, 180, 220, 430), fill="black")
+    draw.rectangle((650, 675, 880, 805), fill="black")
+    result = dz.convert(art, settings(fixed_hoop=True, remove_background=False, fill_type="tatami"))
+    with tempfile.TemporaryDirectory() as tmp:
+        back = pyembroidery.read(dz.save(result.pattern, os.path.join(tmp, "hoop-layout.pes")))
+    points = np.array([(x, y) for x, y, command in stitches(back) if command == STITCH])
+    expected = [(-38, -32, -28, -7), (15, 17.5, 38, 30.5)]
+    for bounds, group in zip(expected, (points[points[:, 0] < 0], points[points[:, 0] >= 0])):
+        measured = (*group.min(axis=0), *group.max(axis=0)) if len(group) else (0, 0, 0, 0)
+        check("4 x 4 layout preserves position and size after PES export",
+              np.allclose(measured, bounds, atol=1), f"{tuple(round(value, 2) for value in measured)} mm")
+
+
 def test_colors_tuck_under():
     """A color sewn first carries on under the color sewn on top of it (no gap between colors)."""
     img = shape(lambda d: (d.rectangle((50, 50, 550, 550), fill=(200, 30, 30)),
