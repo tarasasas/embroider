@@ -333,6 +333,26 @@ def test_coverage_no_gaps():
         art, pattern, center = cov.art_and_result(img, s)
         share, _ = cov.coverage(art, pattern, center)
         check(f"coverage: {name}", share < 0.006, f"{100 * share:.2f}% of the art without thread")
+        # and the reverse: no stitch may run across bare fabric (shows as a stray black strand)
+        import shapely
+        inside = art.buffer(0.35)
+        shapely.prepare(inside)
+        prev, worst, count = None, 0.0, 0
+        for x, y, c in pattern.stitches:
+            c &= 0xFF
+            q = (x / 10 + center[0], y / 10 + center[1])
+            if c == STITCH and prev is not None and math.dist(prev, q) > 0.5:
+                n = max(2, int(math.dist(prev, q) / 0.2))
+                t = np.linspace(0, 1, n)
+                out = ~shapely.contains_xy(inside, prev[0] + (q[0] - prev[0]) * t, prev[1] + (q[1] - prev[1]) * t)
+                over = float(out.mean()) * math.dist(prev, q)
+                if over > 0.3:
+                    count += 1
+                worst = max(worst, over)
+            if c in (STITCH, JUMP):
+                prev = q
+        check(f"no stray strands across fabric: {name}", count == 0,
+              f"{count} stitches cross bare fabric (worst {worst:.2f} mm)")
 
 
 if __name__ == "__main__":

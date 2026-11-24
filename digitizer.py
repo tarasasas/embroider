@@ -828,7 +828,7 @@ def _row_phase(grid_row, pattern):
     return (grid_row % 3) / 3  # brick3: the usual tatami
 
 
-def _fill_rows(rows, spacing, stitch, min_len, min_area, pen, pattern="brick3"):
+def _fill_rows(rows, spacing, stitch, min_len, min_area, pen, pattern="brick3", shape=None):
     """Sews prepared rows back and forth (tatami): needle points every `stitch` along each row,
     staggered between rows.
 
@@ -914,11 +914,33 @@ def _fill_rows(rows, spacing, stitch, min_len, min_area, pen, pattern="brick3"):
             if not forward:
                 inner.reverse()
             row_pts = [point(r, t) for t in [start] + inner + [end]]
+            if pts and shape is not None and not shape.covers(LineString([pts[-1], row_pts[0]])):
+                # the hop to the next row would cross bare fabric (a notch in the shape): end the run
+                # here; the needle then travels around inside the shape, or trims
+                runs.append(pts)
+                pts = []
             if pts:
                 _travel(pts, row_pts[0], stitch)
             pts.extend(row_pts)
-        runs.append(pts)
+        if pts:
+            runs.append(pts)
     return runs, pen
+
+
+def _walk(ring, shape, step):
+    """Stitches around a closed ring, at most `step` long, shortened wherever a straight stitch would
+    cut across a notch outside `shape` (on inward curves a long stitch can leave the shape)."""
+    fine = _resample_closed(np.asarray(ring, float), 0.4)
+    n = len(fine)
+    reach = max(1, int(step / 0.4))
+    out, i = [tuple(fine[0])], 0
+    while i < n:
+        j = min(i + reach, n)
+        while j > i + 1 and not shape.covers(LineString([fine[i], fine[j % n]])):
+            j -= 1
+        out.append(tuple(fine[j % n]))
+        i = j
+    return out
 
 
 def _tatami(poly, center, s, pen):
@@ -934,16 +956,16 @@ def _tatami(poly, center, s, pen):
             if part.area < 2.0:
                 continue
             if part.area >= 12.0:  # edge walk: holds the edge down before the rows go on top
-                walk = _resample_closed(np.asarray(part.exterior.coords)[:-1], 2.5)
-                runs.append([tuple(p) for p in walk] + [tuple(walk[0])])
-                pen = walk[0]
+                walk = _walk(np.asarray(part.exterior.coords)[:-1], part.buffer(0.05), 2.5)
+                runs.append(walk)
+                pen = np.array(walk[-1])
             # rows about 1 mm apart at 90 degrees to the top fill, ~3 mm stitches: measured from
             # Brother's own designs (tools/analyze_pes.py); a firm base keeps top stitches from sinking
             under, pen = _fill_rows(_scan_poly(part, center, angle + 90, 1.0), 1.0, 3.0, 1.0,
-                                    4 * s.min_area_mm2, pen)
+                                    4 * s.min_area_mm2, pen, shape=part.buffer(0.15))
             runs += under
     top, pen = _fill_rows(_scan_poly(poly, center, angle, s.row_spacing_mm), s.row_spacing_mm,
-                          s.stitch_length_mm, 0.5, s.min_area_mm2, pen, s.fill_pattern)
+                          s.stitch_length_mm, 0.5, s.min_area_mm2, pen, s.fill_pattern, shape=poly.buffer(0.15))
     return runs + top, pen
 
 
@@ -1364,7 +1386,12 @@ def digitize(labels, palette, s: Settings, groups=None):
         # also overlaps neighbouring colors slightly so no fabric shows between them
         # ... and 1.6 mm more where they meet this color's satin columns (Brother overlaps ~2 mm), so the two overlap instead of
         # just touching (on stretchy fabric touching pieces pull apart and show a gap)
-        same_color = unary_union(polys).buffer(s.pull_comp_mm)
+        own = unary_union(polys)
+        same_color = own.buffer(s.pull_comp_mm)
+        # growing two nearby shapes can fuse them across a thin white gap; keep such gaps open
+        bridges = own.buffer(s.pull_comp_mm).buffer(-s.pull_comp_mm).difference(own)
+        if not bridges.is_empty:
+            same_color = same_color.difference(bridges.buffer(0.05))
         wide_area = unary_union([w.buffer(s.pull_comp_mm + 1.6) for w in wide]).intersection(same_color)
         # Like Brother's own designs, a color doesn't stop at the edge of a color sewn later on top of
         # it: it carries on ~2 mm underneath, so the two overlap and no fabric can show between them
