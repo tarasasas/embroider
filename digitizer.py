@@ -50,15 +50,15 @@ HOOPS = {
 
 # Fabric presets: settings to apply, and a stabilizer tip.
 FABRICS = {
-    "Woven cotton": ({"row_spacing_mm": 0.3, "satin_spacing_mm": 0.4, "pull_comp_mm": 0.15, "underlay": True},
+    "Woven cotton": ({"row_spacing_mm": 0.24, "satin_spacing_mm": 0.4, "pull_comp_mm": 0.15, "underlay": True},
                      "Medium tear-away stabilizer."),
-    "T-shirt / knit": ({"row_spacing_mm": 0.4, "satin_spacing_mm": 0.4, "pull_comp_mm": 0.25, "underlay": True},
-                       "Cut-away stabilizer. Knits stretch, so density is kept light."),
-    "Denim / canvas": ({"row_spacing_mm": 0.3, "satin_spacing_mm": 0.4, "pull_comp_mm": 0.1, "underlay": True},
+    "T-shirt / knit": ({"row_spacing_mm": 0.25, "satin_spacing_mm": 0.4, "pull_comp_mm": 0.25, "underlay": True},
+                       "Cut-away stabilizer, so the knit can't stretch while it is sewn."),
+    "Denim / canvas": ({"row_spacing_mm": 0.24, "satin_spacing_mm": 0.4, "pull_comp_mm": 0.1, "underlay": True},
                        "Tear-away stabilizer and a size 90/14 needle."),
-    "Towel / fleece": ({"row_spacing_mm": 0.25, "satin_spacing_mm": 0.35, "pull_comp_mm": 0.2, "underlay": True},
+    "Towel / fleece": ({"row_spacing_mm": 0.22, "satin_spacing_mm": 0.35, "pull_comp_mm": 0.2, "underlay": True},
                        "Water-soluble topping on top so stitches don't sink into the pile."),
-    "Cap / thick": ({"row_spacing_mm": 0.35, "satin_spacing_mm": 0.4, "pull_comp_mm": 0.2, "underlay": True},
+    "Cap / thick": ({"row_spacing_mm": 0.25, "satin_spacing_mm": 0.4, "pull_comp_mm": 0.2, "underlay": True},
                     "Firm tear-away backing. Keep designs under about 55 mm tall."),
 }
 
@@ -82,7 +82,7 @@ class Settings:
     fill_type: str = "auto"  # "auto" = satin for narrow shapes, tatami for the rest
     satin_max_mm: float = 6.5  # "auto": shapes narrower than this become satin
     satin_spacing_mm: float = 0.4
-    row_spacing_mm: float = 0.3  # tatami density; smaller = denser
+    row_spacing_mm: float = 0.24  # tatami row spacing; smaller = denser (0.22-0.25 covers like Brother's own fills)
     stitch_length_mm: float = 3.5
     fill_angle: float = 45.0
     auto_angle: bool = True  # long shapes are sewn along their length; others use fill_angle

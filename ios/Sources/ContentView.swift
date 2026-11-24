@@ -14,10 +14,9 @@ enum Fabric: String, CaseIterable, Identifiable {
 
     var rowSpacingMM: Double {
         switch self {
-        case .woven, .denim: return 0.3
-        case .knit: return 0.4
-        case .towel: return 0.25
-        case .cap: return 0.35
+        case .woven, .denim: return 0.24
+        case .knit, .cap: return 0.25
+        case .towel: return 0.22
         }
     }
     var pullCompMM: Double {
@@ -31,7 +30,7 @@ enum Fabric: String, CaseIterable, Identifiable {
     var tip: String {
         switch self {
         case .woven: return "Use medium tear-away stabilizer."
-        case .knit: return "Use cut-away stabilizer. Knits stretch, so the stitching is kept light."
+        case .knit: return "Use cut-away stabilizer, so the knit can't stretch while it is sewn."
         case .denim: return "Use tear-away stabilizer and a 90/14 needle."
         case .towel: return "Put water-soluble topping on top so stitches don't sink into the pile."
         case .cap: return "Use firm tear-away backing. Keep designs under about 2 inches tall."

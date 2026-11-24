@@ -13,7 +13,7 @@ struct Settings {
     var cleanup = 1              // 0-3
     var removeBackground = true
     var brotherColors = true
-    var rowSpacingMM = 0.3       // fill density; smaller = denser
+    var rowSpacingMM = 0.24      // fill density; smaller = denser
     var stitchLengthMM = 3.5
     var fillAngle = 45.0
     var pullCompMM = 0.15
