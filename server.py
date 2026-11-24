@@ -44,20 +44,23 @@ def load_token():
 
 
 def local_addresses():
-    """IPv4 addresses this PC can be reached at on the local network."""
+    """IPv4 addresses of this PC, the one the phone should use first (the PC's main Wi-Fi/LAN address)."""
     found = set()
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
             found.add(info[4][0])
     except OSError:
         pass
-    try:  # the address used for the default route (no packets are sent)
+    main = None
+    try:  # the address used to reach the internet = the home network (no packets are actually sent)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("10.255.255.255", 1))
-            found.add(s.getsockname()[0])
+            s.connect(("8.8.8.8", 80))
+            main = s.getsockname()[0]
+            found.add(main)
     except OSError:
         pass
-    return sorted(a for a in found if not a.startswith("127."))
+    rest = sorted(a for a in found if not a.startswith("127.") and a != main)
+    return ([main] if main else []) + rest
 
 
 def _num(request, key, default, lo, hi):
@@ -181,8 +184,11 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     Handler.token = load_token()
     if "--info" in sys.argv:  # just show the address and pairing code, e.g. when it runs in the background
-        for address in local_addresses():
-            print(f"PC address for the phone:  {address}:{PORT}")
+        addresses = local_addresses()
+        if addresses:
+            print(f"PC address for the phone:  {addresses[0]}:{PORT}")
+            for other in addresses[1:]:
+                print(f"  (other network, usually not this one: {other}:{PORT})")
         print(f"Pairing code:              {Handler.token}")
         return
     try:
@@ -192,8 +198,11 @@ def main():
         sys.exit(1)
     print("Embroidery phone server")
     print("-----------------------")
-    for address in local_addresses():
-        print(f"  PC address for the phone:  {address}:{PORT}")
+    addresses = local_addresses()
+    if addresses:
+        print(f"  PC address for the phone:  {addresses[0]}:{PORT}")
+        for other in addresses[1:]:
+            print(f"    (other network, usually not this one: {other}:{PORT})")
     print(f"  Pairing code:              {Handler.token}")
     print("\nKeep this window open (or run install_autostart.bat so it starts with Windows).")
     print("The first time, allow Python through Windows Firewall on private networks.")
