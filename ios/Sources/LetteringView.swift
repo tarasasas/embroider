@@ -1,32 +1,39 @@
 import SwiftUI
 import UIKit
 
-/// A font offered on the lettering page. Only fonts installed on the phone are shown.
+/// A font installed on the phone, offered on the lettering page.
 struct LetteringFont: Identifiable, Hashable {
-    let name: String        // shown to the user
+    let name: String        // shown to the user, e.g. "Georgia Bold"
     let postScript: String  // UIFont name
-    let group: String
     var id: String { postScript }
+    var initial: String {
+        let first = name.prefix(1).uppercased()
+        return first.rangeOfCharacter(from: .letters) == nil ? "#" : first
+    }
 
-    static let all: [LetteringFont] = [
-        LetteringFont(name: "Avenir Heavy", postScript: "AvenirNext-Heavy", group: "Bold"),
-        LetteringFont(name: "Futura Bold", postScript: "Futura-Bold", group: "Bold"),
-        LetteringFont(name: "Helvetica Bold", postScript: "Helvetica-Bold", group: "Bold"),
-        LetteringFont(name: "Rounded", postScript: "ArialRoundedMTBold", group: "Bold"),
-        LetteringFont(name: "Gill Sans Bold", postScript: "GillSans-Bold", group: "Bold"),
-        LetteringFont(name: "Copperplate", postScript: "Copperplate-Bold", group: "Bold"),
-        LetteringFont(name: "Georgia Bold", postScript: "Georgia-Bold", group: "Serif"),
-        LetteringFont(name: "Baskerville Bold", postScript: "Baskerville-Bold", group: "Serif"),
-        LetteringFont(name: "Rockwell Bold", postScript: "Rockwell-Bold", group: "Serif"),
-        LetteringFont(name: "Didot Bold", postScript: "Didot-Bold", group: "Serif"),
-        LetteringFont(name: "Typewriter", postScript: "AmericanTypewriter-Bold", group: "Serif"),
-        LetteringFont(name: "Snell Script", postScript: "SnellRoundhand-Black", group: "Script"),
-        LetteringFont(name: "Bradley Hand", postScript: "BradleyHandITCTT-Bold", group: "Script"),
-        LetteringFont(name: "Noteworthy", postScript: "Noteworthy-Bold", group: "Script"),
-        LetteringFont(name: "Chalkboard", postScript: "ChalkboardSE-Bold", group: "Fun"),
-        LetteringFont(name: "Marker Felt", postScript: "MarkerFelt-Wide", group: "Fun"),
-        LetteringFont(name: "Papyrus", postScript: "Papyrus-Condensed", group: "Fun"),
-    ].filter { UIFont(name: $0.postScript, size: 12) != nil }
+    /// Icon / symbol fonts: their letters aren't letters, so they're left out.
+    private static let symbolFamilies = ["Zapf Dingbats", "Bodoni Ornaments", "Apple Color Emoji", "Apple Symbols", "Symbol"]
+
+    /// Every font on the phone, A to Z, named "Family Style" (just "Family" for the regular one).
+    static let all: [LetteringFont] = {
+        var out: [LetteringFont] = []
+        for family in UIFont.familyNames.sorted() where !symbolFamilies.contains(family) {
+            for ps in UIFont.fontNames(forFamilyName: family) {
+                guard let font = UIFont(name: ps, size: 12) else { continue }
+                let face = (font.fontDescriptor.object(forKey: .face) as? String) ?? ""
+                let plain = face.isEmpty || ["Regular", "Roman", "Normal", "Book", "Plain"].contains(face)
+                out.append(LetteringFont(name: plain ? family : "\(family) \(face)", postScript: ps))
+            }
+        }
+        return out.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }()
+
+    /// The letters that have at least one font, for the A-Z wheel.
+    static let initials: [String] = {
+        var seen: [String] = []
+        for f in all where !seen.contains(f.initial) { seen.append(f.initial) }
+        return seen
+    }()
 }
 
 /// Draws text as a transparent image the digitizer can turn into stitches.
@@ -58,18 +65,21 @@ enum LetteringRenderer {
     }
 }
 
+/// Lettering, laid out like Artspira's character picker: a big preview on top, the text, and a
+/// two-column wheel (A-Z on the left jumps the font list; every font name is written in its own font).
 struct LetteringView: View {
     /// The hoop's sewing field in mm; the text is sized to fit it with a margin.
     let hoopMM: (w: Double, h: Double)
     let onUse: (UIImage) -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("letteringText") private var text = "Your text"
-    @AppStorage("letteringFont") private var fontName = "AvenirNext-Heavy"
+    @AppStorage("letteringText") private var text = "Bears"
+    @AppStorage("letteringFont") private var fontName = "Georgia-Bold"
     @State private var alignment = 1  // 0 left, 1 center, 2 right
     @State private var letterSpacing = 4.0
     @State private var lineSpacing = 20.0
     @State private var threadColor = Color.black
+    @State private var showStyle = false
     @FocusState private var editing: Bool
 
     private var font: UIFont {
@@ -92,24 +102,45 @@ struct LetteringView: View {
         return Double(font.capHeight) * mmPerPoint / 25.4
     }
 
+    /// The A-Z wheel follows the font wheel; turning it jumps to the first font with that letter.
+    private var letter: Binding<String> {
+        Binding(
+            get: { LetteringFont.all.first { $0.postScript == fontName }?.initial ?? "A" },
+            set: { newLetter in
+                if let first = LetteringFont.all.first(where: { $0.initial == newLetter }) {
+                    fontName = first.postScript
+                }
+            }
+        )
+    }
+
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    preview
-                    textBox
-                    fontGallery
-                    styleControls
+            VStack(spacing: 0) {
+                preview
+                Divider()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        TextField("Your text", text: $text, axis: .vertical)
+                            .focused($editing)
+                            .font(.system(size: 20, weight: .semibold))
+                            .lineLimit(1...4)
+                            .padding(12)
+                            .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
+                        fontWheel
+                        DisclosureGroup("Style", isExpanded: $showStyle) { styleControls }
+                            .padding(12)
+                            .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
+                    }
+                    .padding()
                 }
-                .padding()
             }
-            .background(Color(.systemGroupedBackground))
             .navigationTitle("Lettering")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Use text") {
+                    Button("Done") {
                         if let image = rendered {
                             onUse(image)
                             dismiss()
@@ -120,7 +151,7 @@ struct LetteringView: View {
                 }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
-                    Button("Done") { editing = false }
+                    Button("Hide keyboard") { editing = false }
                 }
             }
         }
@@ -129,89 +160,72 @@ struct LetteringView: View {
     // MARK: - Sections
 
     private var preview: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(spacing: 6) {
             ZStack {
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(Color(red: 0.93, green: 0.91, blue: 0.88))  // fabric
+                Color(.systemGray6)
                 if let image = rendered {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFit()
-                        .padding(12)
+                        .padding(18)
                 } else {
                     Text("Type something below").foregroundStyle(.secondary)
                 }
             }
-            .frame(height: 180)
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.black.opacity(0.08)))
-
+            .frame(height: 230)
             if let image = rendered {
                 let cap = capitalHeight(image)
-                if cap < 0.25 {
-                    Label(String(format: "Capital letters about %.2f in tall: too small to stitch cleanly. Use fewer words, more lines, or a bigger hoop.", cap),
-                          systemImage: "exclamationmark.triangle.fill")
-                        .font(.footnote)
-                        .foregroundStyle(.orange)
-                } else {
-                    Label(String(format: "Capital letters about %.2f in tall when it fills the hoop.", cap),
-                          systemImage: "ruler")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
-
-    private var textBox: some View {
-        card(title: "Text") {
-            TextEditor(text: $text)
-                .focused($editing)
-                .font(.system(size: 20, weight: .semibold))
-                .frame(minHeight: 70, maxHeight: 120)
-                .scrollContentBackground(.hidden)
-            Text("Press Return for a new line.").font(.footnote).foregroundStyle(.secondary)
-        }
-    }
-
-    private var fontGallery: some View {
-        card(title: "Font") {
-            ForEach(["Bold", "Serif", "Script", "Fun"], id: \.self) { group in
-                let fonts = LetteringFont.all.filter { $0.group == group }
-                if !fonts.isEmpty {
-                    Text(group.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            ForEach(fonts) { f in fontChip(f) }
-                        }
-                        .padding(.vertical, 2)
+                Group {
+                    if cap < 0.25 {
+                        Label(String(format: "Capitals about %.2f in tall: too small to stitch cleanly", cap),
+                              systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    } else {
+                        Label(String(format: "Capitals about %.2f in tall when it fills the hoop", cap),
+                              systemImage: "ruler")
+                            .foregroundStyle(.secondary)
                     }
                 }
+                .font(.footnote)
+                .padding(.bottom, 6)
             }
+        }
+        .background(Color(.systemGray6))
+    }
+
+    private var fontWheel: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Font").font(.headline)
+            HStack(spacing: 0) {
+                Picker("Letter", selection: letter) {
+                    ForEach(LetteringFont.initials, id: \.self) { l in
+                        Text(l).font(.title3).tag(l)
+                    }
+                }
+                .pickerStyle(.wheel)
+                .frame(width: 64)
+                .clipped()
+                Picker("Font", selection: $fontName) {
+                    ForEach(LetteringFont.all) { f in
+                        Text(f.name)  // each font's name, written in that font
+                            .font(.custom(f.postScript, size: 22))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.5)
+                            .tag(f.postScript)
+                    }
+                }
+                .pickerStyle(.wheel)
+                .frame(maxWidth: .infinity)
+                .clipped()
+            }
+            .frame(height: 190)
             Text("Bold fonts stitch best. Thin scripts need to be sewn bigger.")
                 .font(.footnote).foregroundStyle(.secondary)
         }
     }
 
-    private func fontChip(_ f: LetteringFont) -> some View {
-        let selected = f.postScript == fontName
-        return Button {
-            fontName = f.postScript
-        } label: {
-            Text(f.name)  // each font's name, written in that font
-                .font(.custom(f.postScript, size: 19))
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-                .padding(.horizontal, 10)
-                .frame(minWidth: 96, minHeight: 54)
-            .background(RoundedRectangle(cornerRadius: 12).fill(selected ? Color.accentColor.opacity(0.15) : Color(.secondarySystemGroupedBackground)))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(selected ? Color.accentColor : Color.black.opacity(0.08), lineWidth: selected ? 2 : 1))
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(.primary)
-    }
-
     private var styleControls: some View {
-        card(title: "Style") {
+        VStack(alignment: .leading, spacing: 12) {
             Picker("Alignment", selection: $alignment) {
                 Image(systemName: "text.alignleft").tag(0)
                 Image(systemName: "text.aligncenter").tag(1)
@@ -230,15 +244,6 @@ struct LetteringView: View {
             Text("A little extra letter spacing keeps letters from merging when stitched.")
                 .font(.footnote).foregroundStyle(.secondary)
         }
-    }
-
-    private func card<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title).font(.headline)
-            content()
-        }
-        .padding()
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 16).fill(Color(.secondarySystemGroupedBackground)))
+        .padding(.top, 8)
     }
 }
