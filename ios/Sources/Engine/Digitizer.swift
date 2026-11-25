@@ -1,6 +1,8 @@
 import UIKit
 
 enum Digitizer {
+    private static let skitchPP1StitchesPerMinute = 400.0
+
     /// Image -> embroidery pattern.
     static func convert(_ image: UIImage, _ s: Settings) throws -> ConversionResult {
         let reduced = try reduceColors(image, s)
@@ -13,7 +15,7 @@ enum Digitizer {
             heightMM: Double(maxY - minY) / UNITS_PER_MM,
             stitchCount: total,
             trimCount: pattern.stitches.filter { $0.cmd == .trim }.count,
-            minutes: Double(total) / 650  // typical home machine speed
+            minutes: Double(total) / skitchPP1StitchesPerMinute
         )
     }
 
