@@ -86,6 +86,8 @@ struct PCClient {
             body["fill_type"] = style.fill
             body["edge"] = style.edge ?? edge
             body["applique_all"] = style == .applique
+        } else {
+            body["fill_type"] = settings.photoFill.rawValue
         }
         if settings.fixedHoop { body["fixed_hoop"] = true }
         if settings.preserveTransparency { body["preserve_transparency"] = true }
@@ -106,6 +108,10 @@ struct PCClient {
         }
         if let style = settings.letteringStyle, style.usesShortFillStitches,
            json["fill_type"] as? String != style.fill {
+            throw PCError.needsStitchServer
+        }
+        if settings.letteringStyle == nil,
+           (json["planned_fill"] as? Bool != true || json["fill_type"] as? String != settings.photoFill.rawValue) {
             throw PCError.needsStitchServer
         }
         if settings.letteringStyle?.requiresPC == true, json["lettering_styles"] as? Bool != true {

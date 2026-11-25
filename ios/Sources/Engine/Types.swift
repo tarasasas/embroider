@@ -16,7 +16,7 @@ enum LetteringStitchStyle: String, CaseIterable, Identifiable {
         case .contour: return "Fill + contour edge"
         case .light: return "Light fill"
         case .auto: return "Auto (satin + fill)"
-        case .tatami: return "Fill"
+        case .tatami: return "Tatami (flat fill)"
         case .satin: return "Satin"
         case .sketch: return "Sketch (running outline)"
         case .bean: return "Bean (triple outline)"
@@ -33,6 +33,13 @@ enum LetteringStitchStyle: String, CaseIterable, Identifiable {
         }
     }
     var edge: String? { self == .sketch ? "running" : self == .bean ? "triple" : nil }
+}
+
+enum PhotoFill: String, CaseIterable, Identifiable {
+    case auto, tatami
+
+    var id: Self { self }
+    var title: String { self == .auto ? "Auto" : "Tatami" }
 }
 
 struct Settings {
@@ -53,6 +60,7 @@ struct Settings {
     var trimMM = 1.0             // jumps longer than this get a trim
     var minAreaMM2 = 1.0         // smaller regions are skipped
     var letteringStyle: LetteringStitchStyle?
+    var photoFill: PhotoFill = .auto
 }
 
 enum StitchCommand {

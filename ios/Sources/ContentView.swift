@@ -140,6 +140,10 @@ struct ContentView: View {
                 }
                 .disabled(busy)
 
+                if image != nil && settings.letteringStyle == nil {
+                    photoFillControls
+                }
+
                 if let design {
                     Section("Stitch preview") {
                         Image(uiImage: design.preview)
@@ -310,11 +314,37 @@ struct ContentView: View {
                 }
             }
         }
+        .onChange(of: settings.photoFill) { _ in
+            recolorTask?.cancel()
+            design = nil
+            fileURL = nil
+            generate()
+        }
         .onChange(of: hoop) { _ in fitToHoop() }
         .onChange(of: lockRatio) { locked in
             if locked { setWidth(settings.widthMM) }
         }
         .onChange(of: fabric) { _ in applyAutomatic() }
+    }
+
+    private var photoFillControls: some View {
+        Section {
+            if pcConfigured {
+                Picker("Fill type", selection: $settings.photoFill) {
+                    ForEach(PhotoFill.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .disabled(busy)
+            } else {
+                LabeledContent("Fill type", value: "Tatami (on phone)")
+            }
+        } header: {
+            Text("Fill type")
+        } footer: {
+            Text(pcConfigured
+                 ? "Auto uses satin for narrow details. Tatami makes a flatter fill. Both use the PC’s planned stitch routing."
+                 : "Connect to the PC server to use Auto or planned Tatami.")
+        }
     }
 
     // MARK: - Colors
