@@ -76,6 +76,9 @@ struct ContentView: View {
     @State private var outline = "none"
     @State private var showAdvanced = false
     @State private var showPC = false
+    @State private var receivingPES = false
+    @State private var receivedPESURL: URL?
+    @State private var transferStatus = ""
     @State private var showLettering = false
     @State private var showMotifs = false
     @State private var showLayout = false
@@ -139,6 +142,24 @@ struct ContentView: View {
                     }
                 }
                 .disabled(busy)
+
+                Section("PES from PC") {
+                    Button(action: receivePES) {
+                        Label(receivingPES ? "Getting PES…" : "Get PES from PC", systemImage: "arrow.down.circle")
+                    }
+                    .disabled(receivingPES || !pcConfigured)
+                    if let receivedPESURL {
+                        Text(receivedPESURL.lastPathComponent)
+                        ShareLink(item: receivedPESURL) {
+                            Label("Save / share received PES", systemImage: "square.and.arrow.up")
+                        }
+                    }
+                    if !transferStatus.isEmpty {
+                        Text(transferStatus).font(.footnote)
+                    } else if !pcConfigured {
+                        Text("Pair your computer in PC connection below.").font(.footnote)
+                    }
+                }
 
                 if image != nil && settings.letteringStyle == nil {
                     photoFillControls
@@ -495,6 +516,22 @@ struct ContentView: View {
     }
 
     // MARK: - PC and conversion
+
+    private func receivePES() {
+        guard pcConfigured, !receivingPES else { return }
+        receivingPES = true
+        transferStatus = ""
+        let client = PCClient(host: pcHost, token: pcCode)
+        Task {
+            defer { receivingPES = false }
+            do {
+                let file = try await client.receivePES()
+                receivedPESURL = try file.save()
+            } catch {
+                transferStatus = error.localizedDescription
+            }
+        }
+    }
 
     private func testConnection() {
         pcStatus = "Connecting..."

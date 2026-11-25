@@ -13,6 +13,26 @@ struct Design {
     var pattern: EmbPattern?  // only for phone-made designs, so their colors can be edited locally
 }
 
+struct ReceivedPES: Decodable {
+    let name: String
+    let pes: Data
+
+    func save() throws -> URL {
+        let filename = name.replacingOccurrences(of: "\\", with: "/").split(separator: "/").last.map(String.init)
+        guard let filename, filename.lowercased().hasSuffix(".pes"), filename.count > 4,
+              pes.starts(with: "#PES".utf8) else {
+            throw PCError.rejected("The PC sent back an invalid PES.")
+        }
+        let documents = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask,
+                                                    appropriateFor: nil, create: true)
+        let folder = documents.appendingPathComponent("PC Transfers", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appendingPathComponent(filename)
+        try pes.write(to: url, options: .atomic)
+        return url
+    }
+}
+
 enum PCError: LocalizedError {
     case unreachable
     case wrongCode
@@ -69,6 +89,20 @@ struct PCClient {
         guard status == 200 else { throw fail(data, status) }
         let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         return (json?["name"] as? String) ?? "PC"
+    }
+
+    func receivePES() async throws -> ReceivedPES {
+        var request = URLRequest(url: try url("/pes/latest"), timeoutInterval: 15)
+        request.setValue(token.trimmingCharacters(in: .whitespaces), forHTTPHeaderField: "X-Token")
+        let (data, status) = try await send(request)
+        if status == 404, case .rejected(let message) = fail(data, status), message == "Not found." {
+            throw PCError.rejected("Update and restart the PC server to receive PES files.")
+        }
+        guard status == 200 else { throw fail(data, status) }
+        guard let file = try? JSONDecoder().decode(ReceivedPES.self, from: data) else {
+            throw PCError.rejected("The PC sent back an invalid PES.")
+        }
+        return file
     }
 
     func convert(image: UIImage, settings: Settings, fabric: String, edge: String, outline: String,
