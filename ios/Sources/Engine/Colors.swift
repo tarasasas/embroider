@@ -222,6 +222,9 @@ func reduceColors(_ image: UIImage, _ s: Settings) throws -> Reduced {
 
     if s.cleanup > 0 {
         labels = modeFilter(labels, w: w, h: h, radius: s.cleanup, count: centers.count)
+        if s.preserveTransparency {
+            for i in labels.indices where !opaque[i] { labels[i] = -1 }
+        }
     }
 
     if extraBackground == 1 {

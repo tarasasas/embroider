@@ -42,6 +42,7 @@ struct Settings {
     var colors = 4
     var cleanup = 1              // 0-3
     var removeBackground = true
+    var preserveTransparency = false
     var boldMM = 0.0              // bolder lines: thickens every shape (made on the PC)
     var brotherColors = true
     var rowSpacingMM = 0.20      // fill density; smaller = denser

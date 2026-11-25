@@ -67,6 +67,8 @@ struct ContentView: View {
 
     @State private var pickerItem: PhotosPickerItem?
     @State private var image: UIImage?
+    @State private var photoOriginal: UIImage?
+    @State private var showSubjectIsolation = false
     @State private var settings = Settings()
     @State private var hoop: Hoop = .fourByFour
     @State private var fabric: Fabric = .knit
@@ -111,6 +113,16 @@ struct ContentView: View {
                 Section {
                     PhotosPicker(selection: $pickerItem, matching: .images) {
                         Label(image == nil ? "Choose image" : "Choose a different image", systemImage: "photo")
+                    }
+                    if #available(iOS 17, *), let original = photoOriginal {
+                        Button {
+                            showSubjectIsolation = true
+                        } label: {
+                            Label("Isolate subject", systemImage: "scissors")
+                        }
+                        if image !== original {
+                            Button("Restore original photo") { useImage(original, sourcePhoto: original) }
+                        }
                     }
                     Button {
                         showLettering = true
@@ -193,7 +205,8 @@ struct ContentView: View {
                     }
                     Stepper(settings.colors == 0 ? "Thread colors: Auto" : "Thread colors: \(settings.colors)",
                             value: $settings.colors, in: 0...15)
-                    Toggle("Remove background", isOn: $settings.removeBackground).disabled(settings.fixedHoop)
+                    Toggle("Remove background", isOn: $settings.removeBackground)
+                        .disabled(settings.fixedHoop || (photoOriginal != nil && image !== photoOriginal))
                     VStack(alignment: .leading) {
                         Text(settings.boldMM < 0.05 ? "Bolder lines: off" : String(format: "Bolder lines: +%.1f mm", settings.boldMM))
                         Slider(value: $settings.boldMM, in: 0...1.0, step: 0.1)
@@ -263,6 +276,13 @@ struct ContentView: View {
             }
             .navigationTitle("Embroidery")
         }
+        .sheet(isPresented: $showSubjectIsolation) {
+            if #available(iOS 17, *), let original = photoOriginal {
+                SubjectIsolationView(original: original) { cutout in
+                    useImage(cutout, sourcePhoto: original)
+                }
+            }
+        }
         .sheet(isPresented: $showLettering) {
             LetteringView(hoopMM: hoop.sizeMM, pcConfigured: pcConfigured, draft: $letteringDraft) { img, style, colors, _ in
                 useImage(img, style: style, colors: colors)
@@ -284,7 +304,7 @@ struct ContentView: View {
             guard let item else { return }
             Task {
                 if let data = try? await item.loadTransferable(type: Data.self), let img = UIImage(data: data) {
-                    useImage(img)
+                    useImage(img, sourcePhoto: img)
                 } else {
                     errorText = "Could not load that photo."
                 }
@@ -360,11 +380,13 @@ struct ContentView: View {
     }
 
     /// Starts a new design from a picture (a photo, or lettering drawn on the lettering page).
-    private func useImage(_ img: UIImage, style: LetteringStitchStyle? = nil, colors: Int = 0, fixedHoop: Bool = false) {
+    private func useImage(_ img: UIImage, style: LetteringStitchStyle? = nil, colors: Int = 0,
+                          fixedHoop: Bool = false, sourcePhoto: UIImage? = nil) {
         design = nil
         fileURL = nil
         recolorTask?.cancel()
-        if style != nil {
+        let isolated = sourcePhoto != nil && img !== sourcePhoto
+        if style != nil || isolated {
             if photoRemoveBackground == nil { photoRemoveBackground = settings.removeBackground }
             settings.removeBackground = false
         } else if let previous = photoRemoveBackground {
@@ -372,9 +394,11 @@ struct ContentView: View {
             photoRemoveBackground = nil
         }
         image = img
+        photoOriginal = sourcePhoto
         artworkColorCount = colors
         settings.letteringStyle = style
         settings.fixedHoop = fixedHoop
+        settings.preserveTransparency = isolated
         aspect = img.size.width / max(1, img.size.height)
         applyAutomatic()
         fitToHoop()

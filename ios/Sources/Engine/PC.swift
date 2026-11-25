@@ -88,6 +88,7 @@ struct PCClient {
             body["applique_all"] = style == .applique
         }
         if settings.fixedHoop { body["fixed_hoop"] = true }
+        if settings.preserveTransparency { body["preserve_transparency"] = true }
         var request = URLRequest(url: try url("/convert"), timeoutInterval: 180)
         request.httpMethod = "POST"
         request.setValue(token.trimmingCharacters(in: .whitespaces), forHTTPHeaderField: "X-Token")
